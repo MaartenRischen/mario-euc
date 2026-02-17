@@ -1,0 +1,2792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Super Mario EUC</title>
+<style>
+:root {
+  --sai-top: env(safe-area-inset-top);
+  --sai-bottom: env(safe-area-inset-bottom);
+  --sai-left: env(safe-area-inset-left);
+  --sai-right: env(safe-area-inset-right);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  background: #000;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: fixed;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+//  SUPER MARIO EUC - Electric Unicycle Edition
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Logical resolution (all drawing code uses these)
+const W = 960, H = 540;
+let canvasScale = 1, canvasOffX = 0, canvasOffY = 0;
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const sw = window.innerWidth, sh = window.innerHeight;
+  canvas.width = sw * dpr;
+  canvas.height = sh * dpr;
+  const scaleX = (sw * dpr) / W, scaleY = (sh * dpr) / H;
+  canvasScale = Math.min(scaleX, scaleY);
+  canvasOffX = (sw * dpr - W * canvasScale) / 2;
+  canvasOffY = (sh * dpr - H * canvasScale) / 2;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
+
+function screenToLogical(cx, cy) {
+  const dpr = window.devicePixelRatio || 1;
+  return { x: (cx * dpr - canvasOffX) / canvasScale, y: (cy * dpr - canvasOffY) / canvasScale };
+}
+
+const T = 32; // tile size
+const GRAVITY = 0.58;
+const FALL_GRAVITY = 0.78;
+const MAX_SPEED = 8.5;
+const TILTBACK_SPEED = 7;
+const JUMP_FORCE = -12.5;
+const JUMP_SPEED_BONUS = -3.5;
+const COYOTE_FRAMES = 6;
+const JUMP_BUFFER = 6;
+
+// ============================================================
+//  INPUT
+// ============================================================
+const keys = {};
+const justPressed = {};
+document.addEventListener('keydown', e => {
+  if (!keys[e.code]) justPressed[e.code] = true;
+  keys[e.code] = true;
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ============================================================
+//  TOUCH INPUT
+// ============================================================
+const touchButtons = {
+  left:  { x:20,  y:400, w:120, h:130, pressed:false },
+  right: { x:150, y:400, w:120, h:130, pressed:false },
+  jump:  { x:740, y:380, w:200, h:150, pressed:false },
+  menu:  { x:905, y:5,   w:45,  h:30,  pressed:false },
+};
+const btnToKey = { left:'ArrowLeft', right:'ArrowRight', jump:'Space' };
+let activeTouches = {};
+let isPortrait = false;
+
+function getTouchedBtn(lx, ly) {
+  for (const [name, b] of Object.entries(touchButtons)) {
+    if (name === 'menu') continue; // handle separately
+    if (lx >= b.x && lx <= b.x+b.w && ly >= b.y && ly <= b.y+b.h) return name;
+  }
+  return null;
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = screenToLogical(t.clientX, t.clientY);
+    // Check menu button
+    const mb = touchButtons.menu;
+    if (p.x>=mb.x && p.x<=mb.x+mb.w && p.y>=mb.y && p.y<=mb.y+mb.h && state==='playing') {
+      state='title'; stateTimer=0; return;
+    }
+    const btn = getTouchedBtn(p.x, p.y);
+    if (btn) {
+      activeTouches[t.identifier] = btn;
+      touchButtons[btn].pressed = true;
+      const kc = btnToKey[btn];
+      if (!keys[kc]) justPressed[kc] = true;
+      keys[kc] = true;
+    } else {
+      // Tap outside buttons → Space (for title start, victory return, etc.)
+      activeTouches[t.identifier] = '_tap';
+      if (!keys['Space']) justPressed['Space'] = true;
+      keys['Space'] = true;
+    }
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = screenToLogical(t.clientX, t.clientY);
+    const newBtn = getTouchedBtn(p.x, p.y);
+    const oldBtn = activeTouches[t.identifier];
+    if (oldBtn && oldBtn !== '_tap' && oldBtn !== newBtn) {
+      touchButtons[oldBtn].pressed = false;
+      keys[btnToKey[oldBtn]] = false;
+    }
+    if (newBtn && newBtn !== oldBtn) {
+      activeTouches[t.identifier] = newBtn;
+      touchButtons[newBtn].pressed = true;
+      const kc = btnToKey[newBtn];
+      if (!keys[kc]) justPressed[kc] = true;
+      keys[kc] = true;
+    } else if (!newBtn && oldBtn && oldBtn !== '_tap') {
+      activeTouches[t.identifier] = null;
+    }
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const btn = activeTouches[t.identifier];
+    if (btn && btn !== '_tap') { touchButtons[btn].pressed = false; keys[btnToKey[btn]] = false; }
+    if (btn === '_tap') keys['Space'] = false;
+    delete activeTouches[t.identifier];
+  }
+}, { passive:false });
+
+canvas.addEventListener('touchcancel', e => {
+  e.preventDefault();
+  for (const id in activeTouches) {
+    const btn = activeTouches[id];
+    if (btn && btn !== '_tap') { touchButtons[btn].pressed = false; keys[btnToKey[btn]] = false; }
+    if (btn === '_tap') keys['Space'] = false;
+  }
+  activeTouches = {};
+}, { passive:false });
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// ============================================================
+//  THEMES
+// ============================================================
+const THEMES = {
+  overworld: {
+    sky: [[0,'#2860c8'],[0.35,'#4a90e8'],[0.65,'#78bbff'],[0.85,'#ade0ff'],[1,'#d4f0ff']],
+    showSun: true, showClouds: true, showMountains: true, showHills: true, showBushes: true,
+    hazeColor: 'rgba(180,220,255,0.08)', vignetteAlpha: 0.25,
+  },
+  underground: {
+    sky: [[0,'#0a0a12'],[0.5,'#14142a'],[1,'#0a0a18']],
+    showSun: false, showClouds: false, showMountains: false, showHills: false, showBushes: false,
+    hazeColor: 'rgba(20,20,50,0.08)', vignetteAlpha: 0.4,
+  },
+  athletic: {
+    sky: [[0,'#1840a0'],[0.3,'#3870d0'],[0.6,'#60a0f0'],[0.85,'#a0d0ff'],[1,'#c8e8ff']],
+    showSun: true, showClouds: true, showMountains: true, showHills: false, showBushes: false,
+    hazeColor: 'rgba(180,220,255,0.04)', vignetteAlpha: 0.2,
+  },
+  castle: {
+    sky: [[0,'#180808'],[0.4,'#2a1010'],[0.7,'#1a0808'],[1,'#100404']],
+    showSun: false, showClouds: false, showMountains: false, showHills: false, showBushes: false,
+    hazeColor: 'rgba(255,80,20,0.03)', vignetteAlpha: 0.45, lavaGlow: true,
+  },
+};
+
+// ============================================================
+//  EUC WHEELS (real models, progression from beginner to beast)
+// ============================================================
+const WHEELS = [
+  { name:'InMotion V8S',    brand:'InMotion',   spd:1.0,  acc:1.0,  jmp:1.0,  tb:1.0,  tire:16, shell:'#4488cc', led:'#44aaff', led2:'#2266aa', desc:'Starter wheel' },
+  { name:'Begode A2',       brand:'Begode',     spd:1.08, acc:1.08, jmp:1.0,  tb:1.04, tire:15, shell:'#3a3a3a', led:'#ff4444', led2:'#aa2222', desc:'Tough & waterproof' },
+  { name:'InMotion V11Y',   brand:'InMotion',   spd:1.22, acc:1.18, jmp:1.08, tb:1.12, tire:18, shell:'#2a2a3a', led:'#00ff88', led2:'#00aa55', desc:'First suspension!' },
+  { name:'KingSong S22 Pro',brand:'KingSong',   spd:1.38, acc:1.30, jmp:1.12, tb:1.22, tire:20, shell:'#1a1a2e', led:'#ffaa00', led2:'#cc7700', desc:'130mm suspension' },
+  { name:'Begode T4 Pro',   brand:'Begode',     spd:1.42, acc:1.42, jmp:1.18, tb:1.28, tire:17, shell:'#2a2a2a', led:'#ff2200', led2:'#cc1100', desc:'Compact rocket' },
+  { name:'Veteran Lynx',    brand:'Leaperkim',  spd:1.58, acc:1.48, jmp:1.15, tb:1.38, tire:20, shell:'#1a2a1a', led:'#44ff44', led2:'#22aa22', desc:'Off-road beast' },
+  { name:'V13 Challenger',  brand:'InMotion',   spd:1.75, acc:1.65, jmp:1.25, tb:1.52, tire:22, shell:'#1a1a2a', led:'#4488ff', led2:'#2255cc', desc:'22" speed demon' },
+  { name:'Begode ET Max',   brand:'Begode',     spd:2.0,  acc:1.85, jmp:1.35, tb:1.7,  tire:22, shell:'#2a1a1a', led:'#ff0000', led2:'#ff4400', desc:'168V — THE BEAST' },
+];
+
+const GEAR_LEVELS = [
+  { name:'No Gear',          hits:0, hat:null,      body:null },
+  { name:'Wrist Guards',     hits:1, hat:null,      body:'#8888aa' },
+  { name:'Full-Face Helmet', hits:2, hat:'#3355aa', body:'#8888aa' },
+  { name:'Full Armor',       hits:3, hat:'#3355aa', body:'#cc4444' },
+];
+
+// Which levels contain wheel upgrades: levelIndex -> {tier, xTile}
+const WHEEL_SPAWNS = {
+  2:{tier:1,xt:90},    // 1-3: Begode A2
+  5:{tier:2,xt:100},   // 2-2: InMotion V11Y
+  9:{tier:3,xt:110},   // 3-2: KingSong S22 Pro
+  13:{tier:4,xt:120},  // 4-2: Begode T4 Pro
+  17:{tier:5,xt:130},  // 5-2: Veteran Lynx
+  22:{tier:6,xt:140},  // 6-3: V13 Challenger
+  28:{tier:7,xt:150},  // 8-1: Begode ET Max
+};
+
+// ============================================================
+//  LEVEL DEFINITIONS
+// ============================================================
+const LEVELS = [
+  // === WORLD 1-1: OVERWORLD ===
+  {
+    name: '1-1', width: 224, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 170, winZone: {x1:169, x2:171},
+    goombas: [22,40,51,52.5,80,82,97,110,120,125,174],
+    coins: [[16,8],[21,8],[23,8],[22,4],[78,8],[95,8],[102,8],[108,4],[118,8],[123,8]],
+    build(L) {
+      for (let x = 0; x < 224; x++) {
+        if ((x>=69&&x<=70)||(x>=86&&x<=88)||(x>=153&&x<=154)) continue;
+        L[13][x]=1; L[14][x]=1;
+      }
+      L[9][16]=3;
+      [20,22,24].forEach(x=>L[9][x]=2);
+      [21,23].forEach(x=>L[9][x]=3);
+      L[5][22]=3;
+      pipe(L,28,11,2); pipe(L,38,10,3); pipe(L,46,10,3); pipe(L,57,10,3);
+      L[9][77]=2; L[9][78]=3; L[9][79]=2;
+      for(let x=80;x<=87;x++) L[5][x]=2;
+      for(let x=91;x<=93;x++) L[5][x]=2;
+      L[9][94]=2; L[9][95]=3; L[9][96]=2;
+      L[9][100]=2; L[9][101]=2; L[9][102]=3; L[9][103]=2;
+      L[5][106]=2; L[5][107]=2; L[5][108]=3; L[5][109]=2;
+      pipe(L,113,11,2); L[9][118]=3;
+      L[9][121]=2; L[9][122]=2; L[9][123]=3; L[9][124]=2;
+      for(let i=0;i<4;i++) for(let y=12-i;y<=12;y++) L[y][134+i]=2;
+      for(let i=0;i<4;i++) for(let y=12-i;y<=12;y++) L[y][143-i]=2;
+      for(let i=0;i<9;i++) for(let y=12-i;y<=12;y++) L[y][160+i]=2;
+      pipe(L,179,11,2);
+    },
+  },
+  // === WORLD 1-2: UNDERGROUND ===
+  {
+    name: '1-2', width: 210, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 198, winZone: {x1:197, x2:199},
+    goombas: [18,33,42,48,55,63,78,83,92,105,115,128,145,170],
+    coins: [[15,8],[35,8],[55,8],[75,4],[80,8],[100,8],[110,4],[130,8],[150,8],[165,8],[175,8],[185,8]],
+    build(L) {
+      // Ceiling rows 0-1
+      for(let x=0;x<210;x++){L[0][x]=1;L[1][x]=1;}
+      // Ground rows 13-14 with pits
+      for(let x=0;x<210;x++){
+        if((x>=60&&x<=61)||(x>=95&&x<=97)||(x>=140&&x<=143)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      // Block clusters
+      L[9][15]=3; L[9][20]=2; L[9][21]=3; L[9][22]=2;
+      // Low ceiling section
+      for(let x=30;x<=50;x++) L[5][x]=2;
+      L[5][35]=3; L[5][45]=3;
+      // Mid pipes
+      pipe(L,25,11,2); pipe(L,45,10,3); pipe(L,65,11,2);
+      // Coin room area
+      for(let x=70;x<=85;x++) L[7][x]=2;
+      L[7][75]=3; L[7][80]=3;
+      L[9][70]=2; L[9][75]=3; L[9][80]=2; L[9][85]=2;
+      // Later section
+      pipe(L,90,10,3);
+      for(let x=100;x<=108;x++) L[9][x]=2;
+      L[9][104]=3;
+      L[5][110]=3; L[5][115]=3;
+      for(let x=120;x<=130;x++) L[5][x]=2;
+      L[5][125]=3;
+      pipe(L,135,11,2);
+      L[9][150]=2; L[9][151]=3; L[9][152]=2;
+      for(let x=155;x<=165;x++) L[9][x]=2;
+      L[9][160]=3;
+      pipe(L,170,10,3);
+      // Exit stairs
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][185+i]=2;
+      pipe(L,195,11,2);
+    },
+  },
+  // === WORLD 1-3: ATHLETIC (SKY) ===
+  {
+    name: '1-3', width: 180, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 170, winZone: {x1:169, x2:171},
+    goombas: [18,45,68,85,108,130,148,160],
+    coins: [[10,10],[17,8],[25,6],[33,9],[42,7],[50,5],[58,8],[66,10],[75,7],[90,5],[100,8],[115,6],[125,9],[140,7],[155,10]],
+    build(L) {
+      // Starting safe ground
+      for(let x=0;x<=12;x++){L[13][x]=1;L[14][x]=1;}
+      // Ending area
+      for(let x=162;x<180;x++){L[13][x]=1;L[14][x]=1;}
+      // Floating platforms of various widths and heights
+      const plats = [
+        [15,19,10],[23,26,8],[30,34,11],[37,40,7],
+        [44,50,9],[54,57,6],[62,68,10],[72,75,8],
+        [80,88,11],[92,95,7],[100,106,9],[110,114,6],
+        [118,125,10],[130,135,8],[140,148,11],[152,157,9],
+      ];
+      for(const[x1,x2,row] of plats)
+        for(let x=x1;x<=x2;x++) L[row][x]=2;
+      // Single-tile precision platforms
+      [28,42,70,110,138].forEach(x=>L[9][x]=2);
+      // Question blocks between platforms
+      L[5][17]=3; L[5][35]=3; L[5][55]=3; L[5][73]=3;
+      L[5][93]=3; L[5][112]=3; L[5][132]=3; L[5][155]=3;
+      // Some brick accents
+      L[8][48]=2; L[8][63]=2; L[8][103]=2; L[8][143]=2;
+      // Exit stairs
+      for(let i=0;i<4;i++) for(let y=12-i;y<=12;y++) L[y][160+i]=2;
+    },
+  },
+  // === WORLD 1-4: CASTLE ===
+  {
+    name: '1-4', width: 210, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 200, winZone: {x1:199, x2:201},
+    goombas: [15,22,30,35,42,50,58,65,72,80,88,95,102,112,120,128,140,152,165,180],
+    coins: [[20,8],[50,4],[80,8],[110,8],[140,4],[170,8],[185,8],[195,8]],
+    build(L) {
+      for(let x=0;x<210;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<210;x++){
+        if((x>=25&&x<=27)||(x>=45&&x<=48)||(x>=65&&x<=68)||(x>=85&&x<=88)||
+           (x>=105&&x<=110)||(x>=130&&x<=134)||(x>=155&&x<=158)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=30;x<=40;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=70;x<=78;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=115;x<=125;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][20]=3; L[9][50]=3; L[9][100]=3; L[9][140]=3;
+      pipe(L,35,10,3); pipe(L,55,11,2); pipe(L,60,10,3);
+      pipe(L,75,11,2); pipe(L,90,10,3);
+      for(let x=95;x<=105;x++) L[9][x]=2; L[9][100]=3;
+      for(let x=115;x<=120;x++) L[7][x]=2;
+      for(let x=135;x<=145;x++) L[9][x]=2; L[9][140]=3;
+      pipe(L,150,10,3); pipe(L,160,11,2);
+      for(let x=165;x<=175;x++) L[9][x]=2; L[9][170]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][185+i]=2;
+      pipe(L,198,11,2);
+    },
+  },
+  // === WORLD 2-1: OVERWORLD ===
+  {
+    name: '2-1', width: 240, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 228, winZone: {x1:227, x2:229},
+    goombas: [18,25,32,38,45,52,60,68,75,82,90,100,115,125,135,150,165,180],
+    coins: [[15,8],[30,4],[48,8],[65,8],[85,4],[105,8],[120,8],[140,4],[160,8],[175,8],[190,8],[210,8]],
+    build(L) {
+      for(let x=0;x<240;x++){
+        if((x>=55&&x<=57)||(x>=72&&x<=73)||(x>=95&&x<=97)||(x>=140&&x<=142)||(x>=185&&x<=187)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][15]=3; [20,21,22].forEach(x=>L[9][x]=2); L[9][21]=3;
+      pipe(L,28,10,3); pipe(L,40,11,2); pipe(L,50,9,4);
+      L[9][60]=2; L[9][61]=3; L[9][62]=2;
+      for(let x=65;x<=70;x++) L[5][x]=2; L[5][67]=3;
+      L[9][78]=2; L[9][79]=3; L[9][80]=2; L[9][81]=2;
+      for(let x=85;x<=92;x++) L[7][x]=2; L[7][88]=3;
+      pipe(L,100,10,3); pipe(L,108,11,2);
+      for(let x=112;x<=118;x++) L[9][x]=2; L[9][115]=3;
+      L[5][120]=3; L[5][125]=3;
+      for(let x=128;x<=136;x++) L[5][x]=2; L[5][132]=3;
+      pipe(L,145,10,3);
+      for(let x=150;x<=158;x++) L[9][x]=2; L[9][154]=3;
+      for(let x=162;x<=168;x++) L[7][x]=2; L[7][165]=3;
+      pipe(L,175,9,4);
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][195+i]=2;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][210-i]=2;
+      for(let i=0;i<10;i++) for(let y=12-i;y<=12;y++) L[y][215+i]=2;
+    },
+  },
+  // === WORLD 2-2: UNDERGROUND ===
+  {
+    name: '2-2', width: 230, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 218, winZone: {x1:217, x2:219},
+    goombas: [15,22,30,38,45,55,62,70,78,88,95,105,115,125,135,148,158,168,180,195],
+    coins: [[12,8],[25,4],[40,8],[58,8],[75,4],[90,8],[108,8],[125,4],[142,8],[160,8],[178,8],[195,8]],
+    build(L) {
+      for(let x=0;x<230;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<230;x++){
+        if((x>=48&&x<=50)||(x>=82&&x<=84)||(x>=120&&x<=123)||(x>=155&&x<=158)||(x>=190&&x<=192)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][12]=3; L[9][18]=2; L[9][19]=3; L[9][20]=2;
+      for(let x=25;x<=35;x++) L[5][x]=2; L[5][28]=3; L[5][32]=3;
+      pipe(L,22,11,2); pipe(L,40,10,3);
+      for(let x=55;x<=65;x++) L[7][x]=2; L[7][58]=3; L[7][62]=3;
+      L[9][55]=2; L[9][65]=2;
+      for(let x=70;x<=78;x++) L[9][x]=2; L[9][74]=3;
+      pipe(L,85,10,3); pipe(L,92,11,2);
+      for(let x=98;x<=108;x++) L[5][x]=2; L[5][103]=3;
+      for(let x=98;x<=108;x++) L[9][x]=2; L[9][103]=3;
+      pipe(L,112,10,3);
+      for(let x=128;x<=140;x++) L[7][x]=2; L[7][132]=3; L[7][137]=3;
+      for(let x=145;x<=152;x++) L[9][x]=2; L[9][148]=3;
+      pipe(L,160,10,3); pipe(L,168,11,2);
+      for(let x=172;x<=182;x++) L[5][x]=2; L[5][177]=3;
+      for(let x=185;x<=195;x++) L[9][x]=2; L[9][190]=3;
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][205+i]=2;
+      pipe(L,215,11,2);
+    },
+  },
+  // === WORLD 2-3: ATHLETIC ===
+  {
+    name: '2-3', width: 200, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 190, winZone: {x1:189, x2:191},
+    goombas: [20,35,50,65,80,95,110,125,140,155,170],
+    coins: [[12,9],[22,7],[35,5],[48,8],[60,6],[72,10],[85,7],[98,5],[112,8],[128,6],[142,9],[158,7],[172,10]],
+    build(L) {
+      for(let x=0;x<=10;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=182;x<200;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [14,18,10],[22,25,8],[29,33,11],[36,38,7],[42,48,9],[52,55,6],
+        [59,64,10],[68,71,8],[75,82,11],[86,89,7],[93,99,9],[103,106,6],
+        [110,116,10],[120,124,8],[128,135,11],[139,142,7],[146,152,9],
+        [156,160,6],[164,170,10],[174,178,8],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [27,40,56,70,90,108,126,144,162].forEach(x=>L[9][x]=2);
+      L[5][22]=3; L[5][38]=3; L[5][55]=3; L[5][72]=3;
+      L[5][89]=3; L[5][106]=3; L[5][124]=3; L[5][142]=3; L[5][160]=3;
+      L[8][46]=2; L[8][62]=2; L[8][96]=2; L[8][132]=2; L[8][150]=2;
+      for(let i=0;i<4;i++) for(let y=12-i;y<=12;y++) L[y][180+i]=2;
+    },
+  },
+  // === WORLD 2-4: CASTLE ===
+  {
+    name: '2-4', width: 230, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 220, winZone: {x1:219, x2:221},
+    goombas: [12,20,28,35,42,50,58,65,72,80,88,95,105,115,125,135,145,155,168,180,195],
+    coins: [[18,8],[45,4],[75,8],[105,8],[135,4],[165,8],[185,8],[200,8]],
+    build(L) {
+      for(let x=0;x<230;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<230;x++){
+        if((x>=22&&x<=24)||(x>=42&&x<=45)||(x>=62&&x<=66)||(x>=82&&x<=86)||
+           (x>=102&&x<=107)||(x>=128&&x<=133)||(x>=152&&x<=157)||(x>=178&&x<=181)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=28;x<=38;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=68;x<=76;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=110;x<=120;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=160;x<=170;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][18]=3; L[9][48]=3; L[9][90]=3; L[9][135]=3; L[9][175]=3;
+      pipe(L,30,10,3); pipe(L,50,11,2); pipe(L,58,10,3);
+      pipe(L,72,11,2); pipe(L,88,10,3); pipe(L,110,11,2);
+      for(let x=95;x<=105;x++) L[9][x]=2; L[9][100]=3;
+      for(let x=115;x<=122;x++) L[7][x]=2;
+      for(let x=138;x<=148;x++) L[9][x]=2; L[9][143]=3;
+      pipe(L,155,10,3); pipe(L,165,11,2);
+      for(let x=170;x<=180;x++) L[9][x]=2; L[9][175]=3;
+      for(let x=185;x<=195;x++) L[7][x]=2; L[7][190]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][205+i]=2;
+      pipe(L,218,11,2);
+    },
+  },
+  // === WORLD 3-1: OVERWORLD ===
+  {
+    name: '3-1', width: 260, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 248, winZone: {x1:247, x2:249},
+    goombas: [15,22,28,35,42,48,55,62,68,75,82,90,100,108,118,128,138,150,162,175,188,200],
+    coins: [[18,8],[35,4],[55,8],[75,4],[95,8],[115,8],[135,4],[155,8],[175,8],[195,4],[215,8],[230,8]],
+    build(L) {
+      for(let x=0;x<260;x++){
+        if((x>=40&&x<=42)||(x>=65&&x<=67)||(x>=88&&x<=91)||(x>=120&&x<=123)||
+           (x>=155&&x<=158)||(x>=195&&x<=198)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][18]=3; [22,23,24].forEach(x=>L[9][x]=2); L[9][23]=3;
+      pipe(L,30,9,4); pipe(L,45,10,3); pipe(L,55,11,2);
+      for(let x=60;x<=64;x++) L[5][x]=2; L[5][62]=3;
+      L[9][70]=2; L[9][71]=3; L[9][72]=2; L[9][73]=2;
+      pipe(L,78,10,3); pipe(L,85,9,4);
+      for(let x=95;x<=105;x++) L[7][x]=2; L[7][98]=3; L[7][102]=3;
+      for(let x=110;x<=116;x++) L[9][x]=2; L[9][113]=3;
+      pipe(L,125,10,3);
+      for(let x=130;x<=140;x++) L[5][x]=2; L[5][133]=3; L[5][137]=3;
+      L[9][145]=2; L[9][146]=3; L[9][147]=2;
+      pipe(L,160,9,4); pipe(L,170,10,3);
+      for(let x=175;x<=185;x++) L[9][x]=2; L[9][178]=3; L[9][182]=3;
+      for(let x=190;x<=194;x++) L[7][x]=2;
+      pipe(L,202,10,3);
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][220+i]=2;
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][232-i]=2;
+      for(let i=0;i<10;i++) for(let y=12-i;y<=12;y++) L[y][236+i]=2;
+    },
+  },
+  // === WORLD 3-2: UNDERGROUND ===
+  {
+    name: '3-2', width: 250, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 238, winZone: {x1:237, x2:239},
+    goombas: [12,20,28,35,42,50,58,65,72,80,88,95,105,115,125,135,145,155,165,175,185,200],
+    coins: [[10,8],[22,4],[38,8],[55,8],[72,4],[88,8],[105,4],[122,8],[140,8],[158,4],[175,8],[192,8],[210,8]],
+    build(L) {
+      for(let x=0;x<250;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<250;x++){
+        if((x>=35&&x<=37)||(x>=60&&x<=63)||(x>=90&&x<=93)||(x>=125&&x<=129)||
+           (x>=160&&x<=163)||(x>=195&&x<=198)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][10]=3; L[9][16]=2; L[9][17]=3; L[9][18]=2;
+      for(let x=22;x<=30;x++) L[5][x]=2; L[5][25]=3; L[5][28]=3;
+      pipe(L,32,10,3); pipe(L,40,11,2);
+      for(let x=45;x<=55;x++) L[7][x]=2; L[7][48]=3; L[7][52]=3;
+      for(let x=55;x<=58;x++) L[9][x]=2;
+      pipe(L,65,10,3); pipe(L,75,11,2);
+      for(let x=80;x<=88;x++) L[5][x]=2; L[5][83]=3; L[5][86]=3;
+      for(let x=80;x<=88;x++) L[9][x]=2; L[9][84]=3;
+      pipe(L,95,10,3);
+      for(let x=100;x<=112;x++) L[7][x]=2; L[7][104]=3; L[7][108]=3;
+      for(let x=115;x<=122;x++) L[9][x]=2; L[9][118]=3;
+      pipe(L,130,10,3); pipe(L,138,11,2);
+      for(let x=142;x<=155;x++) L[5][x]=2; L[5][146]=3; L[5][151]=3;
+      for(let x=165;x<=175;x++) L[9][x]=2; L[9][170]=3;
+      pipe(L,180,10,3); pipe(L,188,11,2);
+      for(let x=192;x<=202;x++) L[7][x]=2; L[7][197]=3;
+      for(let x=205;x<=215;x++) L[9][x]=2; L[9][210]=3;
+      for(let i=0;i<7;i++) for(let y=12-i;y<=12;y++) L[y][225+i]=2;
+      pipe(L,236,11,2);
+    },
+  },
+  // === WORLD 3-3: ATHLETIC ===
+  {
+    name: '3-3', width: 220, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 210, winZone: {x1:209, x2:211},
+    goombas: [18,32,45,58,72,85,98,112,128,142,155,168,182],
+    coins: [[10,9],[20,6],[32,8],[45,5],[58,10],[70,7],[82,5],[95,8],[108,6],[122,9],[135,7],[148,5],[162,8],[175,10],[188,7]],
+    build(L) {
+      for(let x=0;x<=8;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=202;x<220;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [12,15,10],[19,22,7],[26,30,11],[34,36,8],[40,45,9],[49,51,6],
+        [55,60,10],[64,66,8],[70,76,11],[80,83,7],[87,92,9],[96,98,6],
+        [102,108,10],[112,115,8],[119,125,11],[129,132,7],[136,142,9],
+        [146,148,6],[152,158,10],[162,166,8],[170,176,11],[180,184,7],
+        [188,194,9],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [24,38,53,68,84,100,118,134,150,168,186].forEach(x=>L[9][x]=2);
+      L[5][20]=3; L[5][36]=3; L[5][51]=3; L[5][66]=3; L[5][83]=3;
+      L[5][98]=3; L[5][115]=3; L[5][132]=3; L[5][148]=3; L[5][166]=3; L[5][184]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][200+i]=2;
+    },
+  },
+  // === WORLD 3-4: CASTLE ===
+  {
+    name: '3-4', width: 250, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 240, winZone: {x1:239, x2:241},
+    goombas: [12,18,25,32,38,45,52,58,65,72,80,88,95,105,112,122,132,142,152,165,178,190,205],
+    coins: [[15,8],[40,4],[70,8],[100,8],[130,4],[160,8],[190,8],[210,4],[225,8]],
+    build(L) {
+      for(let x=0;x<250;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<250;x++){
+        if((x>=20&&x<=23)||(x>=40&&x<=44)||(x>=60&&x<=64)||(x>=80&&x<=85)||
+           (x>=100&&x<=105)||(x>=125&&x<=130)||(x>=150&&x<=155)||(x>=175&&x<=180)||(x>=200&&x<=203)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=25;x<=35;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=68;x<=76;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=108;x<=118;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=158;x<=168;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=205;x<=215;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][15]=3; L[9][45]=3; L[9][88]=3; L[9][132]=3; L[9][172]=3; L[9][210]=3;
+      pipe(L,28,10,3); pipe(L,48,11,2); pipe(L,55,10,3);
+      pipe(L,70,11,2); pipe(L,85,10,3); pipe(L,108,11,2);
+      for(let x=92;x<=102;x++) L[9][x]=2; L[9][97]=3;
+      for(let x=112;x<=120;x++) L[7][x]=2;
+      pipe(L,135,10,3); pipe(L,145,11,2);
+      for(let x=155;x<=165;x++) L[9][x]=2; L[9][160]=3;
+      for(let x=170;x<=180;x++) L[7][x]=2; L[7][175]=3;
+      pipe(L,185,10,3); pipe(L,195,11,2);
+      for(let x=205;x<=215;x++) L[9][x]=2; L[9][210]=3;
+      for(let i=0;i<9;i++) for(let y=12-i;y<=12;y++) L[y][225+i]=2;
+      pipe(L,238,11,2);
+    },
+  },
+  // === WORLD 4-1: OVERWORLD ===
+  {
+    name: '4-1', width: 280, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 268, winZone: {x1:267, x2:269},
+    goombas: [14,20,26,32,38,44,50,58,65,72,80,88,96,105,115,125,135,148,160,172,185,198,210,225],
+    coins: [[15,8],[32,4],[50,8],[68,4],[88,8],[108,8],[128,4],[148,8],[168,8],[188,4],[208,8],[228,8],[248,8]],
+    build(L) {
+      for(let x=0;x<280;x++){
+        if((x>=35&&x<=37)||(x>=55&&x<=58)||(x>=78&&x<=81)||(x>=105&&x<=108)||
+           (x>=135&&x<=138)||(x>=168&&x<=171)||(x>=205&&x<=208)||(x>=240&&x<=242)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][15]=3; [18,19,20].forEach(x=>L[9][x]=2); L[9][19]=3;
+      pipe(L,25,9,4); pipe(L,38,10,3); pipe(L,48,11,2);
+      for(let x=60;x<=68;x++) L[5][x]=2; L[5][63]=3; L[5][66]=3;
+      L[9][72]=2; L[9][73]=3; L[9][74]=2;
+      pipe(L,82,10,3); pipe(L,90,9,4);
+      for(let x=95;x<=103;x++) L[7][x]=2; L[7][98]=3; L[7][101]=3;
+      for(let x=110;x<=120;x++) L[9][x]=2; L[9][113]=3; L[9][117]=3;
+      pipe(L,125,10,3); pipe(L,132,9,4);
+      for(let x=140;x<=150;x++) L[5][x]=2; L[5][143]=3; L[5][147]=3;
+      L[9][155]=2; L[9][156]=3; L[9][157]=2;
+      pipe(L,162,9,4); pipe(L,175,10,3);
+      for(let x=180;x<=192;x++) L[9][x]=2; L[9][184]=3; L[9][188]=3;
+      for(let x=195;x<=202;x++) L[7][x]=2; L[7][198]=3;
+      pipe(L,210,10,3); pipe(L,218,9,4);
+      for(let x=222;x<=232;x++) L[9][x]=2; L[9][225]=3; L[9][229]=3;
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][245+i]=2;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][255+i]=2;
+    },
+  },
+  // === WORLD 4-2: UNDERGROUND ===
+  {
+    name: '4-2', width: 260, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 248, winZone: {x1:247, x2:249},
+    goombas: [10,18,25,32,40,48,55,62,70,78,85,92,100,110,120,130,140,150,160,170,180,195,210],
+    coins: [[8,8],[22,4],[38,8],[55,4],[72,8],[88,8],[105,4],[122,8],[140,4],[158,8],[175,8],[192,4],[210,8],[228,8]],
+    build(L) {
+      for(let x=0;x<260;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<260;x++){
+        if((x>=30&&x<=33)||(x>=52&&x<=55)||(x>=78&&x<=82)||(x>=108&&x<=112)||
+           (x>=138&&x<=142)||(x>=168&&x<=172)||(x>=202&&x<=205)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][8]=3; [12,13,14].forEach(x=>L[9][x]=2); L[9][13]=3;
+      for(let x=20;x<=28;x++) L[5][x]=2; L[5][22]=3; L[5][26]=3;
+      pipe(L,34,10,3); pipe(L,42,11,2);
+      for(let x=45;x<=50;x++) L[7][x]=2; L[7][47]=3;
+      pipe(L,56,10,3);
+      for(let x=60;x<=72;x++) L[9][x]=2; L[9][64]=3; L[9][68]=3;
+      for(let x=60;x<=72;x++) L[5][x]=2; L[5][64]=3; L[5][68]=3;
+      pipe(L,75,11,2); pipe(L,84,10,3);
+      for(let x=88;x<=100;x++) L[7][x]=2; L[7][92]=3; L[7][96]=3;
+      for(let x=104;x<=106;x++) L[9][x]=2;
+      pipe(L,114,10,3); pipe(L,122,11,2);
+      for(let x=126;x<=136;x++) L[5][x]=2; L[5][129]=3; L[5][133]=3;
+      for(let x=144;x<=155;x++) L[9][x]=2; L[9][148]=3; L[9][152]=3;
+      pipe(L,158,10,3); pipe(L,165,11,2);
+      for(let x=175;x<=185;x++) L[7][x]=2; L[7][178]=3; L[7][182]=3;
+      for(let x=188;x<=198;x++) L[9][x]=2; L[9][192]=3;
+      pipe(L,206,10,3); pipe(L,215,11,2);
+      for(let x=220;x<=230;x++) L[9][x]=2; L[9][225]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][236+i]=2;
+      pipe(L,246,11,2);
+    },
+  },
+  // === WORLD 4-3: ATHLETIC ===
+  {
+    name: '4-3', width: 240, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 230, winZone: {x1:229, x2:231},
+    goombas: [16,28,40,52,64,76,88,100,115,128,140,152,165,178,192,205],
+    coins: [[8,9],[18,6],[30,8],[42,5],[54,10],[66,7],[78,5],[90,8],[105,6],[118,9],[130,7],[142,5],[155,8],[168,10],[180,7],[195,5],[208,8]],
+    build(L) {
+      for(let x=0;x<=7;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=222;x<240;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [11,14,10],[18,20,7],[24,28,11],[32,34,8],[38,43,9],[47,49,6],
+        [53,58,10],[62,64,8],[68,74,11],[78,80,7],[84,90,9],[94,96,6],
+        [100,106,10],[110,113,8],[117,123,11],[127,129,7],[133,139,9],
+        [143,145,6],[149,155,10],[159,162,8],[166,172,11],[176,179,7],
+        [183,189,9],[193,196,6],[200,206,10],[210,214,8],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [22,36,50,66,82,98,115,131,147,164,181,198,212].forEach(x=>L[9][x]=2);
+      L[5][18]=3; L[5][34]=3; L[5][49]=3; L[5][64]=3; L[5][80]=3;
+      L[5][96]=3; L[5][113]=3; L[5][129]=3; L[5][145]=3; L[5][162]=3;
+      L[5][179]=3; L[5][196]=3; L[5][214]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][220+i]=2;
+    },
+  },
+  // === WORLD 4-4: CASTLE ===
+  {
+    name: '4-4', width: 270, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 260, winZone: {x1:259, x2:261},
+    goombas: [10,16,22,28,34,40,48,55,62,70,78,85,92,100,110,118,128,138,148,158,168,178,190,205,220],
+    coins: [[12,8],[35,4],[60,8],[85,8],[110,4],[135,8],[160,4],[185,8],[210,8],[235,4],[250,8]],
+    build(L) {
+      for(let x=0;x<270;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<270;x++){
+        if((x>=18&&x<=21)||(x>=38&&x<=42)||(x>=58&&x<=63)||(x>=78&&x<=83)||
+           (x>=98&&x<=103)||(x>=122&&x<=128)||(x>=148&&x<=153)||(x>=172&&x<=178)||
+           (x>=198&&x<=202)||(x>=228&&x<=231)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=22;x<=32;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=65;x<=75;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=105;x<=115;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=155;x<=165;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=205;x<=215;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][12]=3; L[9][42]=3; L[9][85]=3; L[9][130]=3; L[9][170]=3; L[9][208]=3; L[9][235]=3;
+      pipe(L,25,10,3); pipe(L,45,11,2); pipe(L,52,10,3);
+      pipe(L,68,11,2); pipe(L,82,10,3); pipe(L,105,11,2);
+      for(let x=90;x<=100;x++) L[9][x]=2; L[9][95]=3;
+      for(let x=110;x<=118;x++) L[7][x]=2;
+      pipe(L,130,10,3); pipe(L,140,11,2);
+      for(let x=150;x<=160;x++) L[9][x]=2; L[9][155]=3;
+      pipe(L,165,10,3);
+      for(let x=180;x<=190;x++) L[7][x]=2; L[7][185]=3;
+      pipe(L,195,11,2); pipe(L,205,10,3);
+      for(let x=210;x<=222;x++) L[9][x]=2; L[9][215]=3; L[9][220]=3;
+      for(let x=232;x<=240;x++) L[7][x]=2; L[7][236]=3;
+      for(let i=0;i<10;i++) for(let y=12-i;y<=12;y++) L[y][245+i]=2;
+      pipe(L,258,11,2);
+    },
+  },
+  // === WORLD 5-1: OVERWORLD ===
+  {
+    name: '5-1', width: 300, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 288, winZone: {x1:287, x2:289},
+    goombas: [12,18,24,30,36,42,48,55,62,68,75,82,90,98,108,118,128,138,148,158,168,180,192,205,218,232,248,260],
+    coins: [[14,8],[30,4],[48,8],[65,4],[85,8],[105,8],[125,4],[145,8],[165,8],[185,4],[205,8],[225,8],[245,4],[265,8]],
+    build(L) {
+      for(let x=0;x<300;x++){
+        if((x>=30&&x<=33)||(x>=50&&x<=53)||(x>=72&&x<=76)||(x>=98&&x<=102)||
+           (x>=128&&x<=132)||(x>=158&&x<=162)||(x>=192&&x<=196)||(x>=228&&x<=231)||(x>=258&&x<=260)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][14]=3; [17,18,19,20].forEach(x=>L[9][x]=2); L[9][18]=3;
+      pipe(L,24,9,4); pipe(L,35,10,3); pipe(L,45,11,2);
+      for(let x=55;x<=65;x++) L[5][x]=2; L[5][58]=3; L[5][62]=3;
+      pipe(L,68,9,4); L[9][78]=2; L[9][79]=3; L[9][80]=2;
+      for(let x=84;x<=94;x++) L[7][x]=2; L[7][87]=3; L[7][91]=3;
+      pipe(L,104,10,3); pipe(L,112,9,4);
+      for(let x=118;x<=126;x++) L[9][x]=2; L[9][121]=3; L[9][124]=3;
+      for(let x=133;x<=145;x++) L[5][x]=2; L[5][137]=3; L[5][141]=3;
+      pipe(L,150,10,3); L[9][164]=2; L[9][165]=3; L[9][166]=2;
+      pipe(L,170,9,4); pipe(L,180,10,3);
+      for(let x=185;x<=195;x++) L[9][x]=2; L[9][188]=3; L[9][192]=3;
+      for(let x=198;x<=208;x++) L[7][x]=2; L[7][202]=3;
+      pipe(L,212,10,3); pipe(L,220,9,4);
+      for(let x=235;x<=245;x++) L[9][x]=2; L[9][238]=3; L[9][242]=3;
+      for(let i=0;i<6;i++) for(let y=12-i;y<=12;y++) L[y][265+i]=2;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][275+i]=2;
+    },
+  },
+  // === WORLD 5-2: UNDERGROUND ===
+  {
+    name: '5-2', width: 280, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 268, winZone: {x1:267, x2:269},
+    goombas: [10,16,22,28,35,42,48,55,62,70,78,85,92,100,108,118,128,138,148,158,168,178,188,200,215,230],
+    coins: [[8,8],[20,4],[35,8],[50,4],[68,8],[85,8],[102,4],[120,8],[138,4],[155,8],[172,8],[190,4],[208,8],[225,8],[245,8]],
+    build(L) {
+      for(let x=0;x<280;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<280;x++){
+        if((x>=25&&x<=28)||(x>=48&&x<=52)||(x>=72&&x<=77)||(x>=100&&x<=105)||
+           (x>=130&&x<=135)||(x>=160&&x<=165)||(x>=195&&x<=200)||(x>=232&&x<=235)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][8]=3; [12,13,14].forEach(x=>L[9][x]=2); L[9][13]=3;
+      for(let x=18;x<=24;x++) L[5][x]=2; L[5][20]=3; L[5][23]=3;
+      pipe(L,29,10,3); pipe(L,38,11,2);
+      for(let x=42;x<=48;x++) L[7][x]=2; L[7][44]=3; L[7][47]=3;
+      pipe(L,53,10,3);
+      for(let x=58;x<=70;x++) L[9][x]=2; L[9][62]=3; L[9][67]=3;
+      for(let x=58;x<=70;x++) L[5][x]=2; L[5][62]=3; L[5][67]=3;
+      pipe(L,78,11,2); pipe(L,85,10,3);
+      for(let x=90;x<=98;x++) L[7][x]=2; L[7][93]=3; L[7][96]=3;
+      pipe(L,106,10,3); pipe(L,115,11,2);
+      for(let x=120;x<=128;x++) L[5][x]=2; L[5][123]=3; L[5][126]=3;
+      for(let x=136;x<=148;x++) L[9][x]=2; L[9][140]=3; L[9][145]=3;
+      pipe(L,152,10,3); pipe(L,162,11,2);
+      for(let x=168;x<=178;x++) L[7][x]=2; L[7][172]=3; L[7][176]=3;
+      for(let x=182;x<=192;x++) L[9][x]=2; L[9][186]=3;
+      pipe(L,201,10,3); pipe(L,210,11,2);
+      for(let x=215;x<=228;x++) L[5][x]=2; L[5][220]=3; L[5][225]=3;
+      for(let x=236;x<=248;x++) L[9][x]=2; L[9][240]=3; L[9][245]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][255+i]=2;
+      pipe(L,266,11,2);
+    },
+  },
+  // === WORLD 5-3: ATHLETIC ===
+  {
+    name: '5-3', width: 250, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 240, winZone: {x1:239, x2:241},
+    goombas: [14,25,36,48,60,72,84,96,108,120,135,148,160,172,185,198,212],
+    coins: [[8,9],[16,6],[26,8],[38,5],[50,10],[62,7],[74,5],[86,8],[98,6],[112,9],[125,7],[138,5],[150,8],[162,10],[175,7],[188,5],[202,8],[215,10]],
+    build(L) {
+      for(let x=0;x<=6;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=232;x<250;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [10,12,10],[16,18,7],[22,26,11],[30,32,8],[36,40,9],[44,46,6],
+        [50,54,10],[58,60,8],[64,69,11],[73,75,7],[79,84,9],[88,90,6],
+        [94,98,10],[102,104,8],[108,113,11],[117,119,7],[123,128,9],
+        [132,134,6],[138,143,10],[147,150,8],[154,159,11],[163,165,7],
+        [169,174,9],[178,180,6],[184,189,10],[193,196,8],[200,205,11],
+        [209,212,7],[216,222,9],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [20,34,48,62,77,92,106,121,136,150,167,182,198,214].forEach(x=>L[9][x]=2);
+      L[5][16]=3; L[5][32]=3; L[5][46]=3; L[5][60]=3; L[5][75]=3;
+      L[5][90]=3; L[5][104]=3; L[5][119]=3; L[5][134]=3; L[5][150]=3;
+      L[5][165]=3; L[5][180]=3; L[5][196]=3; L[5][212]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][230+i]=2;
+    },
+  },
+  // === WORLD 5-4: CASTLE ===
+  {
+    name: '5-4', width: 290, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 280, winZone: {x1:279, x2:281},
+    goombas: [10,15,20,26,32,38,44,50,58,65,72,80,88,95,102,110,118,128,138,148,158,168,178,188,200,212,225,240,258],
+    coins: [[12,8],[32,4],[55,8],[80,8],[105,4],[130,8],[155,4],[180,8],[205,8],[230,4],[255,8],[270,8]],
+    build(L) {
+      for(let x=0;x<290;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<290;x++){
+        if((x>=16&&x<=19)||(x>=35&&x<=40)||(x>=55&&x<=60)||(x>=75&&x<=81)||
+           (x>=98&&x<=104)||(x>=120&&x<=126)||(x>=145&&x<=151)||(x>=170&&x<=176)||
+           (x>=195&&x<=200)||(x>=222&&x<=226)||(x>=248&&x<=252)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=20;x<=30;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=62;x<=72;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=108;x<=118;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=152;x<=162;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=202;x<=212;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=240;x<=248;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][12]=3; L[9][40]=3; L[9][82]=3; L[9][128]=3; L[9][168]=3; L[9][205]=3; L[9][232]=3; L[9][255]=3;
+      pipe(L,22,10,3); pipe(L,42,11,2); pipe(L,50,10,3);
+      pipe(L,65,11,2); pipe(L,80,10,3);
+      for(let x=85;x<=95;x++) L[9][x]=2; L[9][90]=3;
+      pipe(L,105,11,2); pipe(L,115,10,3);
+      for(let x=128;x<=138;x++) L[7][x]=2; L[7][132]=3;
+      pipe(L,142,10,3); pipe(L,152,11,2);
+      for(let x=158;x<=168;x++) L[9][x]=2; L[9][163]=3;
+      pipe(L,175,10,3);
+      for(let x=182;x<=192;x++) L[7][x]=2; L[7][187]=3;
+      pipe(L,200,11,2); pipe(L,210,10,3);
+      for(let x=215;x<=225;x++) L[9][x]=2; L[9][220]=3;
+      for(let x=228;x<=238;x++) L[7][x]=2; L[7][233]=3;
+      pipe(L,242,10,3);
+      for(let x=253;x<=262;x++) L[9][x]=2; L[9][257]=3;
+      for(let i=0;i<10;i++) for(let y=12-i;y<=12;y++) L[y][265+i]=2;
+      pipe(L,278,11,2);
+    },
+  },
+  // === WORLD 6-1: OVERWORLD ===
+  {
+    name: '6-1', width: 320, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 308, winZone: {x1:307, x2:309},
+    goombas: [10,16,22,28,34,40,46,52,58,64,70,78,86,94,102,112,122,132,142,152,162,172,185,198,210,222,235,248,262,278],
+    coins: [[12,8],[28,4],[45,8],[62,4],[80,8],[98,8],[118,4],[138,8],[158,8],[178,4],[198,8],[218,8],[238,4],[258,8],[278,8]],
+    build(L) {
+      for(let x=0;x<320;x++){
+        if((x>=25&&x<=28)||(x>=45&&x<=49)||(x>=68&&x<=72)||(x>=92&&x<=97)||
+           (x>=118&&x<=123)||(x>=148&&x<=153)||(x>=178&&x<=183)||(x>=212&&x<=216)||
+           (x>=248&&x<=252)||(x>=278&&x<=280)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][12]=3; [15,16,17,18].forEach(x=>L[9][x]=2); L[9][16]=3;
+      pipe(L,22,9,4); pipe(L,30,10,3); pipe(L,42,11,2);
+      for(let x=50;x<=60;x++) L[5][x]=2; L[5][53]=3; L[5][57]=3;
+      pipe(L,64,9,4); L[9][75]=2; L[9][76]=3; L[9][77]=2;
+      for(let x=80;x<=90;x++) L[7][x]=2; L[7][83]=3; L[7][87]=3;
+      pipe(L,98,10,3); pipe(L,108,9,4);
+      for(let x=114;x<=122;x++) L[9][x]=2; L[9][117]=3; L[9][120]=3;
+      for(let x=125;x<=138;x++) L[5][x]=2; L[5][129]=3; L[5][134]=3;
+      pipe(L,142,10,3); L[9][156]=2; L[9][157]=3; L[9][158]=2;
+      pipe(L,162,9,4); pipe(L,172,10,3);
+      for(let x=185;x<=198;x++) L[9][x]=2; L[9][189]=3; L[9][194]=3;
+      for(let x=200;x<=210;x++) L[7][x]=2; L[7][204]=3;
+      pipe(L,218,10,3); pipe(L,228,9,4);
+      for(let x=235;x<=245;x++) L[9][x]=2; L[9][238]=3; L[9][242]=3;
+      pipe(L,255,10,3);
+      for(let x=260;x<=270;x++) L[7][x]=2; L[7][264]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][285+i]=2;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][295+i]=2;
+    },
+  },
+  // === WORLD 6-2: UNDERGROUND ===
+  {
+    name: '6-2', width: 300, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 288, winZone: {x1:287, x2:289},
+    goombas: [8,14,20,26,32,38,44,50,58,65,72,80,88,95,102,110,118,128,138,148,158,168,178,188,198,210,225,240,255],
+    coins: [[6,8],[18,4],[32,8],[48,4],[65,8],[82,8],[98,4],[115,8],[132,4],[148,8],[165,8],[182,4],[198,8],[215,8],[232,4],[250,8],[268,8]],
+    build(L) {
+      for(let x=0;x<300;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<300;x++){
+        if((x>=22&&x<=26)||(x>=45&&x<=50)||(x>=68&&x<=73)||(x>=95&&x<=101)||
+           (x>=125&&x<=131)||(x>=155&&x<=161)||(x>=188&&x<=194)||(x>=222&&x<=227)||(x>=255&&x<=258)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][6]=3; [10,11,12].forEach(x=>L[9][x]=2); L[9][11]=3;
+      for(let x=16;x<=22;x++) L[5][x]=2; L[5][18]=3; L[5][21]=3;
+      pipe(L,27,10,3); pipe(L,35,11,2);
+      for(let x=40;x<=48;x++) L[7][x]=2; L[7][43]=3; L[7][46]=3;
+      pipe(L,52,10,3);
+      for(let x=56;x<=66;x++) L[9][x]=2; L[9][59]=3; L[9][63]=3;
+      for(let x=56;x<=66;x++) L[5][x]=2; L[5][60]=3; L[5][64]=3;
+      pipe(L,74,11,2); pipe(L,82,10,3);
+      for(let x=88;x<=98;x++) L[7][x]=2; L[7][91]=3; L[7][95]=3;
+      pipe(L,102,10,3); pipe(L,112,11,2);
+      for(let x=118;x<=128;x++) L[5][x]=2; L[5][121]=3; L[5][125]=3;
+      for(let x=132;x<=145;x++) L[9][x]=2; L[9][136]=3; L[9][141]=3;
+      pipe(L,150,10,3); pipe(L,162,11,2);
+      for(let x=166;x<=178;x++) L[7][x]=2; L[7][170]=3; L[7][174]=3;
+      for(let x=182;x<=192;x++) L[9][x]=2; L[9][186]=3;
+      pipe(L,196,10,3); pipe(L,205,11,2);
+      for(let x=210;x<=222;x++) L[5][x]=2; L[5][214]=3; L[5][219]=3;
+      for(let x=228;x<=242;x++) L[9][x]=2; L[9][233]=3; L[9][238]=3;
+      pipe(L,248,10,3);
+      for(let x=260;x<=270;x++) L[7][x]=2; L[7][264]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][275+i]=2;
+      pipe(L,286,11,2);
+    },
+  },
+  // === WORLD 6-3: ATHLETIC ===
+  {
+    name: '6-3', width: 270, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 260, winZone: {x1:259, x2:261},
+    goombas: [12,22,32,42,52,62,72,82,95,108,120,132,145,158,170,182,195,208,222,238],
+    coins: [[6,9],[14,6],[24,8],[34,5],[44,10],[54,7],[64,5],[74,8],[88,6],[102,9],[115,7],[128,5],[140,8],[152,10],[165,7],[178,5],[192,8],[205,10],[218,7],[235,5]],
+    build(L) {
+      for(let x=0;x<=5;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=252;x<270;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [9,11,10],[15,17,7],[21,24,11],[28,30,8],[34,38,9],[42,44,6],
+        [48,52,10],[56,58,8],[62,67,11],[71,73,7],[77,82,9],[86,88,6],
+        [92,96,10],[100,102,8],[106,111,11],[115,117,7],[121,126,9],
+        [130,132,6],[136,141,10],[145,148,8],[152,157,11],[161,163,7],
+        [167,172,9],[176,178,6],[182,187,10],[191,194,8],[198,203,11],
+        [207,210,7],[214,220,9],[224,227,6],[231,236,10],[240,244,8],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [19,32,46,60,75,90,104,119,134,149,165,180,196,212,228,243].forEach(x=>L[9][x]=2);
+      L[5][15]=3; L[5][30]=3; L[5][44]=3; L[5][58]=3; L[5][73]=3;
+      L[5][88]=3; L[5][102]=3; L[5][117]=3; L[5][132]=3; L[5][148]=3;
+      L[5][163]=3; L[5][178]=3; L[5][194]=3; L[5][210]=3; L[5][227]=3; L[5][244]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][250+i]=2;
+    },
+  },
+  // === WORLD 6-4: CASTLE ===
+  {
+    name: '6-4', width: 310, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 300, winZone: {x1:299, x2:301},
+    goombas: [8,14,20,26,32,38,44,50,56,62,70,78,86,94,102,110,118,126,136,146,156,166,176,186,196,208,220,235,250,268,285],
+    coins: [[10,8],[30,4],[52,8],[75,8],[98,4],[120,8],[142,4],[165,8],[188,8],[210,4],[232,8],[255,8],[278,4]],
+    build(L) {
+      for(let x=0;x<310;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<310;x++){
+        if((x>=14&&x<=18)||(x>=32&&x<=37)||(x>=52&&x<=58)||(x>=72&&x<=78)||
+           (x>=95&&x<=101)||(x>=118&&x<=125)||(x>=145&&x<=152)||(x>=172&&x<=179)||
+           (x>=198&&x<=204)||(x>=225&&x<=230)||(x>=252&&x<=257)||(x>=278&&x<=282)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=20;x<=28;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=60;x<=68;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=102;x<=112;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=155;x<=165;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=205;x<=215;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=258;x<=265;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][10]=3; L[9][38]=3; L[9][80]=3; L[9][125]=3; L[9][165]=3; L[9][205]=3; L[9][235]=3; L[9][260]=3;
+      pipe(L,22,10,3); pipe(L,40,11,2); pipe(L,48,10,3);
+      pipe(L,62,11,2); pipe(L,78,10,3);
+      for(let x=84;x<=94;x++) L[9][x]=2; L[9][88]=3;
+      pipe(L,102,11,2); pipe(L,112,10,3);
+      for(let x=126;x<=136;x++) L[7][x]=2; L[7][130]=3;
+      pipe(L,140,10,3); pipe(L,150,11,2);
+      for(let x=155;x<=168;x++) L[9][x]=2; L[9][160]=3;
+      pipe(L,175,10,3);
+      for(let x=182;x<=195;x++) L[7][x]=2; L[7][187]=3; L[7][192]=3;
+      pipe(L,200,11,2); pipe(L,210,10,3);
+      for(let x=218;x<=228;x++) L[9][x]=2; L[9][222]=3;
+      for(let x=232;x<=242;x++) L[7][x]=2; L[7][237]=3;
+      pipe(L,245,10,3);
+      for(let x=258;x<=268;x++) L[9][x]=2; L[9][262]=3;
+      for(let x=270;x<=280;x++) L[7][x]=2; L[7][275]=3;
+      for(let i=0;i<10;i++) for(let y=12-i;y<=12;y++) L[y][285+i]=2;
+      pipe(L,298,11,2);
+    },
+  },
+  // === WORLD 7-1: OVERWORLD ===
+  {
+    name: '7-1', width: 340, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 328, winZone: {x1:327, x2:329},
+    goombas: [10,15,20,25,30,35,40,45,52,58,64,70,78,86,94,102,110,118,128,138,148,158,168,178,188,198,210,225,238,252,268,282,298],
+    coins: [[10,8],[25,4],[42,8],[58,4],[75,8],[92,8],[110,4],[128,8],[148,8],[168,4],[188,8],[208,8],[228,4],[248,8],[268,8],[288,4],[308,8]],
+    build(L) {
+      for(let x=0;x<340;x++){
+        if((x>=22&&x<=26)||(x>=42&&x<=47)||(x>=62&&x<=67)||(x>=85&&x<=91)||
+           (x>=112&&x<=118)||(x>=142&&x<=148)||(x>=172&&x<=178)||(x>=205&&x<=210)||
+           (x>=238&&x<=243)||(x>=268&&x<=272)||(x>=298&&x<=301)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][10]=3; [13,14,15,16].forEach(x=>L[9][x]=2); L[9][14]=3;
+      pipe(L,20,9,4); pipe(L,28,10,3); pipe(L,38,11,2);
+      for(let x=48;x<=58;x++) L[5][x]=2; L[5][51]=3; L[5][55]=3;
+      pipe(L,60,9,4); L[9][70]=2; L[9][71]=3; L[9][72]=2;
+      for(let x=76;x<=86;x++) L[7][x]=2; L[7][79]=3; L[7][83]=3;
+      pipe(L,92,10,3); pipe(L,102,9,4);
+      for(let x=108;x<=118;x++) L[9][x]=2; L[9][111]=3; L[9][115]=3;
+      for(let x=122;x<=135;x++) L[5][x]=2; L[5][126]=3; L[5][131]=3;
+      pipe(L,138,10,3); L[9][152]=2; L[9][153]=3; L[9][154]=2;
+      pipe(L,158,9,4); pipe(L,168,10,3);
+      for(let x=180;x<=195;x++) L[9][x]=2; L[9][185]=3; L[9][190]=3;
+      for(let x=198;x<=208;x++) L[7][x]=2; L[7][202]=3;
+      pipe(L,212,10,3); pipe(L,222,9,4);
+      for(let x=228;x<=240;x++) L[9][x]=2; L[9][232]=3; L[9][237]=3;
+      pipe(L,245,10,3);
+      for(let x=252;x<=262;x++) L[7][x]=2; L[7][256]=3;
+      pipe(L,275,9,4);
+      for(let x=280;x<=290;x++) L[9][x]=2; L[9][284]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][305+i]=2;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][315+i]=2;
+    },
+  },
+  // === WORLD 7-2: UNDERGROUND ===
+  {
+    name: '7-2', width: 320, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 308, winZone: {x1:307, x2:309},
+    goombas: [8,13,18,23,28,34,40,46,52,58,65,72,80,88,96,104,112,120,130,140,150,160,170,180,190,200,212,225,240,255,270,288],
+    coins: [[6,8],[18,4],[30,8],[45,4],[62,8],[78,8],[95,4],[112,8],[128,4],[145,8],[162,8],[178,4],[195,8],[212,8],[228,4],[245,8],[262,8],[280,4],[298,8]],
+    build(L) {
+      for(let x=0;x<320;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<320;x++){
+        if((x>=20&&x<=24)||(x>=42&&x<=48)||(x>=65&&x<=71)||(x>=90&&x<=97)||
+           (x>=118&&x<=125)||(x>=148&&x<=155)||(x>=178&&x<=185)||(x>=212&&x<=218)||
+           (x>=245&&x<=251)||(x>=275&&x<=280)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][6]=3; [9,10,11].forEach(x=>L[9][x]=2); L[9][10]=3;
+      for(let x=14;x<=20;x++) L[5][x]=2; L[5][16]=3; L[5][19]=3;
+      pipe(L,25,10,3); pipe(L,33,11,2);
+      for(let x=38;x<=46;x++) L[7][x]=2; L[7][40]=3; L[7][44]=3;
+      pipe(L,50,10,3);
+      for(let x=55;x<=65;x++) L[9][x]=2; L[9][58]=3; L[9][62]=3;
+      for(let x=55;x<=65;x++) L[5][x]=2; L[5][58]=3; L[5][62]=3;
+      pipe(L,72,11,2); pipe(L,80,10,3);
+      for(let x=85;x<=95;x++) L[7][x]=2; L[7][88]=3; L[7][92]=3;
+      pipe(L,100,10,3); pipe(L,108,11,2);
+      for(let x=112;x<=125;x++) L[5][x]=2; L[5][116]=3; L[5][121]=3;
+      for(let x=128;x<=142;x++) L[9][x]=2; L[9][133]=3; L[9][138]=3;
+      pipe(L,148,10,3); pipe(L,158,11,2);
+      for(let x=162;x<=175;x++) L[7][x]=2; L[7][166]=3; L[7][171]=3;
+      for(let x=188;x<=200;x++) L[9][x]=2; L[9][192]=3; L[9][197]=3;
+      pipe(L,205,10,3); pipe(L,215,11,2);
+      for(let x=220;x<=235;x++) L[5][x]=2; L[5][225]=3; L[5][230]=3;
+      for(let x=238;x<=252;x++) L[9][x]=2; L[9][243]=3; L[9][248]=3;
+      pipe(L,258,10,3);
+      for(let x=265;x<=278;x++) L[7][x]=2; L[7][270]=3; L[7][275]=3;
+      for(let x=282;x<=292;x++) L[9][x]=2; L[9][286]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][295+i]=2;
+      pipe(L,306,11,2);
+    },
+  },
+  // === WORLD 7-3: ATHLETIC ===
+  {
+    name: '7-3', width: 280, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 270, winZone: {x1:269, x2:271},
+    goombas: [10,18,28,38,48,58,68,78,88,100,112,125,138,150,162,175,188,200,212,225,240,255],
+    coins: [[5,9],[12,6],[22,8],[32,5],[42,10],[52,7],[62,5],[72,8],[82,6],[95,9],[108,7],[120,5],[132,8],[145,10],[158,7],[170,5],[182,8],[195,10],[208,7],[222,5],[238,8],[252,10]],
+    build(L) {
+      for(let x=0;x<=4;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=262;x<280;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [8,10,10],[14,16,7],[20,23,11],[27,29,8],[33,37,9],[41,43,6],
+        [47,51,10],[55,57,8],[61,66,11],[70,72,7],[76,81,9],[85,87,6],
+        [91,95,10],[99,101,8],[105,110,11],[114,116,7],[120,125,9],
+        [129,131,6],[135,140,10],[144,147,8],[151,156,11],[160,162,7],
+        [166,171,9],[175,177,6],[181,186,10],[190,193,8],[197,202,11],
+        [206,209,7],[213,218,9],[222,224,6],[228,233,10],[237,240,8],
+        [244,250,11],[254,257,8],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [18,31,45,59,74,89,103,118,133,149,164,179,195,211,226,242,256].forEach(x=>L[9][x]=2);
+      L[5][14]=3; L[5][29]=3; L[5][43]=3; L[5][57]=3; L[5][72]=3;
+      L[5][87]=3; L[5][101]=3; L[5][116]=3; L[5][131]=3; L[5][147]=3;
+      L[5][162]=3; L[5][177]=3; L[5][193]=3; L[5][209]=3; L[5][224]=3; L[5][240]=3; L[5][257]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][260+i]=2;
+    },
+  },
+  // === WORLD 7-4: CASTLE ===
+  {
+    name: '7-4', width: 330, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 320, winZone: {x1:319, x2:321},
+    goombas: [8,13,18,23,28,33,38,44,50,56,62,68,76,84,92,100,108,116,124,134,144,154,164,174,184,194,206,218,232,248,265,282,300],
+    coins: [[8,8],[28,4],[50,8],[72,8],[95,4],[118,8],[140,4],[162,8],[185,8],[208,4],[230,8],[252,8],[275,4],[298,8]],
+    build(L) {
+      for(let x=0;x<330;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<330;x++){
+        if((x>=12&&x<=16)||(x>=30&&x<=36)||(x>=50&&x<=56)||(x>=70&&x<=77)||
+           (x>=92&&x<=99)||(x>=115&&x<=122)||(x>=142&&x<=149)||(x>=168&&x<=176)||
+           (x>=195&&x<=202)||(x>=225&&x<=231)||(x>=255&&x<=261)||(x>=285&&x<=290)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=18;x<=26;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=58;x<=66;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=100;x<=110;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=150;x<=160;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=205;x<=215;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=262;x<=270;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][8]=3; L[9][36]=3; L[9][78]=3; L[9][122]=3; L[9][162]=3; L[9][202]=3; L[9][235]=3; L[9][265]=3; L[9][292]=3;
+      pipe(L,20,10,3); pipe(L,38,11,2); pipe(L,46,10,3);
+      pipe(L,60,11,2); pipe(L,75,10,3);
+      for(let x=80;x<=92;x++) L[9][x]=2; L[9][85]=3;
+      pipe(L,100,11,2); pipe(L,110,10,3);
+      for(let x=124;x<=134;x++) L[7][x]=2; L[7][128]=3;
+      pipe(L,138,10,3); pipe(L,148,11,2);
+      for(let x=155;x<=168;x++) L[9][x]=2; L[9][160]=3;
+      pipe(L,175,10,3);
+      for(let x=180;x<=195;x++) L[7][x]=2; L[7][185]=3; L[7][192]=3;
+      pipe(L,200,11,2); pipe(L,210,10,3);
+      for(let x=218;x<=228;x++) L[9][x]=2; L[9][222]=3;
+      for(let x=232;x<=245;x++) L[7][x]=2; L[7][237]=3; L[7][242]=3;
+      pipe(L,248,10,3);
+      for(let x=262;x<=275;x++) L[9][x]=2; L[9][267]=3; L[9][272]=3;
+      for(let x=278;x<=288;x++) L[7][x]=2; L[7][282]=3;
+      for(let i=0;i<11;i++) for(let y=12-i;y<=12;y++) L[y][295+i]=2;
+      pipe(L,318,11,2);
+    },
+  },
+  // === WORLD 8-1: OVERWORLD ===
+  {
+    name: '8-1', width: 360, height: 15, theme: 'overworld',
+    playerStart: {x:3, y:10}, flagpoleX: 348, winZone: {x1:347, x2:349},
+    goombas: [8,13,18,23,28,33,38,43,48,54,60,66,72,78,86,94,102,110,118,126,136,146,156,166,176,186,196,206,218,232,245,258,272,288,305,320],
+    coins: [[8,8],[22,4],[38,8],[55,4],[72,8],[90,8],[108,4],[126,8],[145,8],[165,4],[185,8],[205,8],[225,4],[245,8],[265,8],[285,4],[305,8],[325,8]],
+    build(L) {
+      for(let x=0;x<360;x++){
+        if((x>=18&&x<=22)||(x>=38&&x<=43)||(x>=58&&x<=64)||(x>=82&&x<=88)||
+           (x>=108&&x<=114)||(x>=138&&x<=144)||(x>=168&&x<=175)||(x>=198&&x<=205)||
+           (x>=232&&x<=238)||(x>=262&&x<=268)||(x>=295&&x<=300)||(x>=322&&x<=325)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][8]=3; [11,12,13,14].forEach(x=>L[9][x]=2); L[9][12]=3;
+      pipe(L,16,9,4); pipe(L,24,10,3); pipe(L,34,11,2);
+      for(let x=44;x<=55;x++) L[5][x]=2; L[5][47]=3; L[5][51]=3;
+      pipe(L,58,9,4); L[9][68]=2; L[9][69]=3; L[9][70]=2;
+      for(let x=74;x<=84;x++) L[7][x]=2; L[7][77]=3; L[7][81]=3;
+      pipe(L,90,10,3); pipe(L,100,9,4);
+      for(let x=105;x<=115;x++) L[9][x]=2; L[9][108]=3; L[9][112]=3;
+      for(let x=118;x<=132;x++) L[5][x]=2; L[5][122]=3; L[5][128]=3;
+      pipe(L,136,10,3); L[9][148]=2; L[9][149]=3; L[9][150]=2;
+      pipe(L,155,9,4); pipe(L,165,10,3);
+      for(let x=176;x<=195;x++) L[9][x]=2; L[9][180]=3; L[9][186]=3; L[9][192]=3;
+      for(let x=198;x<=210;x++) L[7][x]=2; L[7][202]=3; L[7][207]=3;
+      pipe(L,215,10,3); pipe(L,225,9,4);
+      for(let x=240;x<=255;x++) L[9][x]=2; L[9][244]=3; L[9][250]=3;
+      pipe(L,260,10,3);
+      for(let x=270;x<=282;x++) L[7][x]=2; L[7][274]=3; L[7][279]=3;
+      pipe(L,288,9,4);
+      for(let x=302;x<=315;x++) L[9][x]=2; L[9][306]=3; L[9][312]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][328+i]=2;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][338+i]=2;
+    },
+  },
+  // === WORLD 8-2: UNDERGROUND ===
+  {
+    name: '8-2', width: 340, height: 15, theme: 'underground',
+    playerStart: {x:3, y:10}, flagpoleX: 328, winZone: {x1:327, x2:329},
+    goombas: [6,11,16,21,26,32,38,44,50,56,62,68,75,82,90,98,106,114,122,130,140,150,160,170,180,190,200,210,222,235,250,265,280,298,312],
+    coins: [[5,8],[16,4],[28,8],[42,4],[58,8],[75,8],[92,4],[108,8],[125,4],[142,8],[158,8],[175,4],[192,8],[208,8],[225,4],[242,8],[258,8],[275,4],[295,8],[312,8]],
+    build(L) {
+      for(let x=0;x<340;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<340;x++){
+        if((x>=18&&x<=23)||(x>=38&&x<=44)||(x>=60&&x<=67)||(x>=85&&x<=92)||
+           (x>=112&&x<=120)||(x>=142&&x<=150)||(x>=175&&x<=183)||(x>=208&&x<=215)||
+           (x>=240&&x<=247)||(x>=272&&x<=278)||(x>=302&&x<=306)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      L[9][5]=3; [8,9,10].forEach(x=>L[9][x]=2); L[9][9]=3;
+      for(let x=13;x<=20;x++) L[5][x]=2; L[5][15]=3; L[5][18]=3;
+      pipe(L,24,10,3); pipe(L,32,11,2);
+      for(let x=36;x<=44;x++) L[7][x]=2; L[7][38]=3; L[7][42]=3;
+      pipe(L,48,10,3);
+      for(let x=52;x<=62;x++) L[9][x]=2; L[9][55]=3; L[9][59]=3;
+      for(let x=52;x<=62;x++) L[5][x]=2; L[5][55]=3; L[5][59]=3;
+      pipe(L,68,11,2); pipe(L,78,10,3);
+      for(let x=82;x<=92;x++) L[7][x]=2; L[7][85]=3; L[7][89]=3;
+      pipe(L,96,10,3); pipe(L,105,11,2);
+      for(let x=110;x<=122;x++) L[5][x]=2; L[5][114]=3; L[5][119]=3;
+      for(let x=125;x<=140;x++) L[9][x]=2; L[9][130]=3; L[9][136]=3;
+      pipe(L,145,10,3); pipe(L,155,11,2);
+      for(let x=160;x<=175;x++) L[7][x]=2; L[7][165]=3; L[7][171]=3;
+      for(let x=185;x<=200;x++) L[9][x]=2; L[9][190]=3; L[9][196]=3;
+      pipe(L,205,10,3); pipe(L,215,11,2);
+      for(let x=220;x<=238;x++) L[5][x]=2; L[5][225]=3; L[5][232]=3;
+      for(let x=248;x<=265;x++) L[9][x]=2; L[9][253]=3; L[9][260]=3;
+      pipe(L,268,10,3);
+      for(let x=280;x<=295;x++) L[7][x]=2; L[7][285]=3; L[7][291]=3;
+      for(let x=308;x<=318;x++) L[9][x]=2; L[9][312]=3;
+      for(let i=0;i<8;i++) for(let y=12-i;y<=12;y++) L[y][318+i]=2;
+      pipe(L,326,11,2);
+    },
+  },
+  // === WORLD 8-3: ATHLETIC ===
+  {
+    name: '8-3', width: 300, height: 15, theme: 'athletic',
+    playerStart: {x:2, y:10}, flagpoleX: 290, winZone: {x1:289, x2:291},
+    goombas: [8,16,24,32,40,48,56,64,72,82,92,105,118,130,142,155,168,180,192,205,218,232,248,262,278],
+    coins: [[4,9],[10,6],[18,8],[28,5],[38,10],[48,7],[58,5],[68,8],[78,6],[88,9],[100,7],[112,5],[125,8],[138,10],[150,7],[162,5],[175,8],[188,10],[200,7],[215,5],[228,8],[242,10],[258,7],[272,5]],
+    build(L) {
+      for(let x=0;x<=3;x++){L[13][x]=1;L[14][x]=1;}
+      for(let x=282;x<300;x++){L[13][x]=1;L[14][x]=1;}
+      const plats=[
+        [7,9,10],[13,15,7],[19,22,11],[26,28,8],[32,36,9],[40,42,6],
+        [46,50,10],[54,56,8],[60,64,11],[68,70,7],[74,78,9],[82,84,6],
+        [88,92,10],[96,98,8],[102,106,11],[110,112,7],[116,120,9],
+        [124,126,6],[130,134,10],[138,141,8],[145,149,11],[153,155,7],
+        [159,163,9],[167,169,6],[173,177,10],[181,184,8],[188,192,11],
+        [196,198,7],[202,206,9],[210,212,6],[216,220,10],[224,227,8],
+        [231,236,11],[240,243,7],[247,252,9],[256,259,6],[263,268,10],
+        [272,275,8],
+      ];
+      for(const[x1,x2,row] of plats) for(let x=x1;x<=x2;x++) L[row][x]=2;
+      [17,30,44,58,72,86,100,114,128,143,157,171,186,200,214,228,244,260,274].forEach(x=>L[9][x]=2);
+      L[5][13]=3; L[5][28]=3; L[5][42]=3; L[5][56]=3; L[5][70]=3;
+      L[5][84]=3; L[5][98]=3; L[5][112]=3; L[5][126]=3; L[5][141]=3;
+      L[5][155]=3; L[5][169]=3; L[5][184]=3; L[5][198]=3; L[5][212]=3;
+      L[5][227]=3; L[5][243]=3; L[5][259]=3; L[5][275]=3;
+      for(let i=0;i<5;i++) for(let y=12-i;y<=12;y++) L[y][280+i]=2;
+    },
+  },
+  // === WORLD 8-4: CASTLE (FINAL) ===
+  {
+    name: '8-4', width: 350, height: 15, theme: 'castle',
+    playerStart: {x:3, y:10}, flagpoleX: 340, winZone: {x1:339, x2:341},
+    goombas: [6,10,14,18,22,26,30,35,40,45,50,56,62,68,74,80,88,96,104,112,120,128,136,146,156,166,176,186,196,206,216,228,242,258,275,292,310,325],
+    coins: [[8,8],[25,4],[45,8],[65,8],[85,4],[105,8],[125,4],[145,8],[165,8],[185,4],[205,8],[225,8],[245,4],[265,8],[285,8],[305,4],[325,8],[335,8]],
+    build(L) {
+      for(let x=0;x<350;x++){L[0][x]=1;L[1][x]=1;}
+      for(let x=0;x<350;x++){
+        if((x>=10&&x<=14)||(x>=28&&x<=34)||(x>=48&&x<=55)||(x>=68&&x<=76)||
+           (x>=90&&x<=98)||(x>=112&&x<=120)||(x>=140&&x<=149)||(x>=168&&x<=177)||
+           (x>=198&&x<=206)||(x>=228&&x<=235)||(x>=258&&x<=265)||(x>=288&&x<=294)||(x>=318&&x<=322)) continue;
+        L[13][x]=1;L[14][x]=1;
+      }
+      for(let x=16;x<=24;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=56;x<=64;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=100;x<=110;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=150;x<=160;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=208;x<=218;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=268;x<=276;x++){L[3][x]=2;L[4][x]=2;}
+      for(let x=296;x<=305;x++){L[3][x]=2;L[4][x]=2;}
+      L[9][8]=3; L[9][35]=3; L[9][76]=3; L[9][120]=3; L[9][160]=3; L[9][206]=3; L[9][240]=3; L[9][270]=3; L[9][298]=3; L[9][325]=3;
+      pipe(L,18,10,3); pipe(L,36,11,2); pipe(L,44,10,3);
+      pipe(L,58,11,2); pipe(L,72,10,3);
+      for(let x=78;x<=90;x++) L[9][x]=2; L[9][82]=3; L[9][87]=3;
+      pipe(L,98,11,2); pipe(L,108,10,3);
+      for(let x=122;x<=135;x++) L[7][x]=2; L[7][126]=3; L[7][131]=3;
+      pipe(L,138,10,3); pipe(L,148,11,2);
+      for(let x=155;x<=168;x++) L[9][x]=2; L[9][159]=3; L[9][164]=3;
+      pipe(L,175,10,3);
+      for(let x=180;x<=198;x++) L[7][x]=2; L[7][185]=3; L[7][192]=3;
+      pipe(L,200,11,2); pipe(L,212,10,3);
+      for(let x=220;x<=232;x++) L[9][x]=2; L[9][224]=3; L[9][229]=3;
+      for(let x=236;x<=248;x++) L[7][x]=2; L[7][240]=3; L[7][245]=3;
+      pipe(L,252,10,3);
+      for(let x=266;x<=280;x++) L[9][x]=2; L[9][270]=3; L[9][276]=3;
+      for(let x=282;x<=295;x++) L[7][x]=2; L[7][287]=3; L[7][292]=3;
+      pipe(L,300,10,3);
+      for(let x=308;x<=320;x++) L[9][x]=2; L[9][312]=3; L[9][318]=3;
+      for(let i=0;i<12;i++) for(let y=12-i;y<=12;y++) L[y][325+i]=2;
+      pipe(L,338,11,2);
+    },
+  },
+];
+
+function pipe(L, x, topY, h) {
+  L[topY][x]=4; L[topY][x+1]=5;
+  for(let y=topY+1;y<topY+h;y++){L[y][x]=6;L[y][x+1]=7;}
+}
+
+function findGroundY(L, tx, lh) {
+  if (tx < 0 || tx >= L[0].length) return 11;
+  for (let y = 0; y < lh; y++) { if (L[y][tx] > 0) return y - 1; }
+  return 11;
+}
+
+// ============================================================
+//  LEVEL STATE
+// ============================================================
+let LW = 224, LH = 15;
+let level = [];
+let hitBlocks = new Set();
+let currentLevel = 0;
+let currentTheme = 'overworld';
+let persistentScore = 0, persistentCoins = 0, persistentWheel = 0, persistentGear = 0;
+
+function loadLevel(idx) {
+  currentLevel = idx;
+  const def = LEVELS[idx];
+  LW = def.width;
+  LH = def.height;
+  currentTheme = def.theme;
+  level = Array.from({length:LH}, ()=>new Array(LW).fill(0));
+  hitBlocks = new Set();
+  def.build(level);
+  // Entities
+  goombas = def.goombas.map(x=>({x:x*T,y:12*T,vx:-0.8,vy:0,alive:true,squish:0,frame:0}));
+  coinItems = def.coins.map(([x,y])=>({x:x*T+16,y:y*T+16,collected:false,bobOffset:Math.random()*Math.PI*2}));
+  particles = [];
+  floatTexts = [];
+  // Wheel upgrade pickup
+  wheelPickups = [];
+  const ws = WHEEL_SPAWNS[idx];
+  if (ws && ws.tier > P.wheelTier) {
+    const wy = findGroundY(level, ws.xt, LH) - 2;
+    wheelPickups.push({x:ws.xt*T+16, y:wy*T+16, tier:ws.tier, collected:false, bobOffset:0});
+  }
+  // Gear pickups every 2 levels (on ground-safe spots)
+  gearPickups = [];
+  if (idx % 2 === 1) {
+    const gx1 = Math.floor(def.width * 0.35);
+    const gy1 = findGroundY(level, gx1, LH) - 2;
+    gearPickups.push({x:gx1*T+16, y:gy1*T+16, collected:false, bobOffset:Math.random()*Math.PI*2});
+  }
+  if (idx % 3 === 0 && idx > 0) {
+    const gx2 = Math.floor(def.width * 0.65);
+    const gy2 = findGroundY(level, gx2, LH) - 2;
+    gearPickups.push({x:gx2*T+16, y:gy2*T+16, collected:false, bobOffset:Math.random()*Math.PI*2});
+  }
+  // Player position reset (preserve score)
+  P.x = def.playerStart.x*T;
+  P.y = def.playerStart.y*T;
+  P.vx=0; P.vy=0; P.onGround=false;
+  P.lean=0; P.leanInput=0; P.wheelRot=0; P.tiltback=0; P.motorTorque=0;
+  P.coyoteTimer=0; P.jumpBufferTimer=0; P.jumpHeld=false;
+  P.facingRight=true; P.alive=true;
+  P.armAngle=0; P.landSquash=0; P.airTime=0;
+  cam.x=0; screenShake=0;
+  // Save score checkpoint for death revert
+  persistentScore = P.score;
+  persistentCoins = P.coins;
+  persistentWheel = P.wheelTier;
+  persistentGear = P.gearTier;
+  // Clear render cache for theme change
+  for(const k in _cache) delete _cache[k];
+}
+
+function tileAt(px, py) {
+  const tx = Math.floor(px/T), ty = Math.floor(py/T);
+  if (tx<0||tx>=LW||ty<0||ty>=LH) return 0;
+  return level[ty][tx];
+}
+function solid(t) { return t>=1 && t<=7; }
+
+// ============================================================
+//  ENTITIES
+// ============================================================
+let goombas=[], coinItems=[], particles=[], floatTexts=[];
+let wheelPickups=[], gearPickups=[];
+let upgradeFlash=0, upgradeFlashText='';
+
+function spawnParticles(x, y, color, count, spread, speed) {
+  for (let i=0;i<count;i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random()-0.5)*spread,
+      vy: -Math.random()*speed - speed*0.5,
+      color, life: 20+Math.random()*20,
+      maxLife:40, size:2+Math.random()*2
+    });
+  }
+}
+
+// ============================================================
+//  PLAYER (Mario on EUC)
+// ============================================================
+let P = {};
+let cam = {x:0, y:0};
+let screenShake = 0;
+
+function resetPlayer() {
+  P = {
+    x:3*T, y:10*T, vx:0, vy:0, w:20, h:40,
+    onGround:false, lean:0, leanInput:0, wheelRot:0, tiltback:0, motorTorque:0,
+    coyoteTimer:0, jumpBufferTimer:0, jumpHeld:false,
+    facingRight:true, alive:true, score:0, coins:0,
+    armAngle:0, landSquash:0, airTime:0,
+    wheelTier:0, gearTier:0, iFrames:0,
+  };
+}
+
+// ============================================================
+//  EUC PHYSICS
+// ============================================================
+function updateEUC() {
+  const p = P;
+  const w = WHEELS[p.wheelTier];
+  const curMaxSpeed = MAX_SPEED * w.spd;
+  const curTiltback = TILTBACK_SPEED * w.tb;
+  const accelMult = w.acc;
+  const jumpMult = w.jmp;
+
+  const left = keys['ArrowLeft']||keys['KeyA'];
+  const right = keys['ArrowRight']||keys['KeyD'];
+  const jumpPress = justPressed['Space']||justPressed['ArrowUp']||justPressed['KeyW'];
+  const jumpHeld = keys['Space']||keys['ArrowUp']||keys['KeyW'];
+
+  p.leanInput = right ? 1 : left ? -1 : 0;
+  if (right) p.facingRight=true;
+  if (left) p.facingRight=false;
+
+  const leanSpeed = p.onGround ? 0.12 : 0.05;
+  p.lean += (p.leanInput*0.9 - p.lean)*leanSpeed;
+
+  if (p.onGround) {
+    const leanForce = p.lean*0.34*accelMult;
+    p.motorTorque += (leanForce - p.motorTorque)*0.22;
+    p.vx += p.motorTorque;
+    p.vx *= 0.987;
+    const braking = (p.lean>0.15&&p.vx<-0.3)||(p.lean<-0.15&&p.vx>0.3);
+    if (braking) {
+      p.vx *= 0.93;
+      if (Math.abs(p.vx)>2&&Math.random()<0.4)
+        spawnParticles(p.x+p.w/2, p.y+p.h, '#ffcc44', 1, 2, 1);
+    }
+    if (Math.abs(p.leanInput)<0.1) {
+      p.vx *= 0.993;
+      if (Math.abs(p.vx)<0.08) p.vx=0;
+    }
+    const speed = Math.abs(p.vx);
+    if (speed>curTiltback) {
+      const tb = (speed-curTiltback)/(curMaxSpeed-curTiltback);
+      p.tiltback = Math.min(tb,1);
+      p.vx += p.tiltback*0.15*-Math.sign(p.vx);
+    } else { p.tiltback *= 0.9; }
+    p.coyoteTimer = COYOTE_FRAMES;
+    p.airTime = 0;
+  } else {
+    p.vx += p.lean*0.18*accelMult;
+    p.motorTorque *= 0.9;
+    p.tiltback *= 0.95;
+    p.airTime++;
+    if (p.coyoteTimer>0) p.coyoteTimer--;
+  }
+
+  if (Math.abs(p.vx)>curMaxSpeed) p.vx = Math.sign(p.vx)*curMaxSpeed;
+
+  if (jumpPress) p.jumpBufferTimer = JUMP_BUFFER;
+  if (p.jumpBufferTimer>0) p.jumpBufferTimer--;
+
+  const canJump = p.onGround||p.coyoteTimer>0;
+  if (p.jumpBufferTimer>0 && canJump) {
+    const speedRatio = Math.min(Math.abs(p.vx)/curMaxSpeed, 1);
+    p.vy = JUMP_FORCE*jumpMult + JUMP_SPEED_BONUS*speedRatio;
+    if (Math.abs(p.vx)<2.5 && Math.abs(p.leanInput)>0.5) p.vx += p.leanInput*3;
+    p.onGround=false; p.coyoteTimer=0; p.jumpBufferTimer=0;
+    p.jumpHeld=true; p.landSquash=-0.15;
+    spawnParticles(p.x+p.w/2, p.y+p.h, w.led, 5, 4, 2);
+  }
+
+  if (!jumpHeld && p.vy<-4) { p.vy *= 0.7; p.jumpHeld=false; }
+
+  const grav = p.vy>0 ? FALL_GRAVITY : GRAVITY;
+  p.vy += grav;
+  if (p.vy>15) p.vy=15;
+
+  if (p.iFrames>0) p.iFrames--;
+
+  p.x += p.vx; p.y += p.vy;
+  p.wheelRot += p.vx*0.12;
+  p.landSquash *= 0.85;
+  const targetArm = p.onGround ? p.lean*0.6 : (p.airTime>10 ? 0.8 : p.lean*0.3);
+  p.armAngle += (targetArm - p.armAngle)*0.1;
+}
+
+// ============================================================
+//  COLLISION
+// ============================================================
+function collide() {
+  const p = P;
+  if (p.vx>0) {
+    for (let ty=Math.floor(p.y/T);ty<=Math.floor((p.y+p.h-1)/T);ty++) {
+      if (solid(tileAt(p.x+p.w,ty*T))) {
+        p.x=Math.floor((p.x+p.w)/T)*T-p.w; p.vx*=-0.2; screenShake=3; break;
+      }
+    }
+  } else if (p.vx<0) {
+    for (let ty=Math.floor(p.y/T);ty<=Math.floor((p.y+p.h-1)/T);ty++) {
+      if (solid(tileAt(p.x,ty*T))) {
+        p.x=Math.floor(p.x/T)*T+T; p.vx*=-0.2; screenShake=3; break;
+      }
+    }
+  }
+  p.onGround=false;
+  if (p.vy>0) {
+    for (let tx=Math.floor(p.x/T);tx<=Math.floor((p.x+p.w-1)/T);tx++) {
+      if (solid(tileAt(tx*T,p.y+p.h))) {
+        const wasAir = p.airTime>5;
+        p.y=Math.floor((p.y+p.h)/T)*T-p.h; p.onGround=true;
+        if (wasAir) { p.landSquash=Math.min(p.vy*0.04,0.35); spawnParticles(p.x+p.w/2,p.y+p.h,'#bbb',3,3,1.5); }
+        p.vy=0; break;
+      }
+    }
+  } else if (p.vy<0) {
+    for (let tx=Math.floor(p.x/T);tx<=Math.floor((p.x+p.w-1)/T);tx++) {
+      const ty=Math.floor(p.y/T);
+      const t=tileAt(tx*T,p.y);
+      if (solid(t)) { p.y=ty*T+T; p.vy=0; if(t===3) hitQuestion(tx,ty); screenShake=2; break; }
+    }
+  }
+}
+
+function hitQuestion(tx,ty) {
+  const k=tx+','+ty;
+  if (hitBlocks.has(k)) return;
+  hitBlocks.add(k);
+  P.score+=200; P.coins++;
+  floatTexts.push({x:tx*T+16,y:ty*T-8,text:'+200',t:50,vy:-1.5});
+  spawnParticles(tx*T+16,ty*T,'#f8d878',8,5,4);
+}
+
+// ============================================================
+//  GAME STATE
+// ============================================================
+let state = 'title', stateTimer = 0, time = 0;
+
+function resetGame() {
+  resetPlayer();
+  P.score=0; P.coins=0;
+  currentLevel=0;
+  loadLevel(0);
+  state='playing';
+}
+
+function update() {
+  time++;
+
+  if (state==='title') {
+    if (justPressed['Space']||justPressed['Enter']) resetGame();
+    clearJustPressed(); return;
+  }
+  if (state==='dead') {
+    stateTimer++;
+    P.vy += GRAVITY*0.6; P.y += P.vy; P.wheelRot += 0.15;
+    if (stateTimer>150) {
+      P.score = persistentScore; P.coins = persistentCoins;
+      P.wheelTier = persistentWheel; P.gearTier = persistentGear;
+      loadLevel(currentLevel);
+      state='playing';
+    }
+    clearJustPressed(); return;
+  }
+  if (state==='win') {
+    stateTimer++;
+    if (stateTimer<80) { P.y+=1.5; P.wheelRot+=0.05; }
+    if (stateTimer>200) {
+      if (currentLevel < LEVELS.length-1) {
+        state='levelClear'; stateTimer=0;
+      } else {
+        state='victory'; stateTimer=0;
+      }
+    }
+    clearJustPressed(); return;
+  }
+  if (state==='levelClear') {
+    stateTimer++;
+    if (stateTimer>120) {
+      loadLevel(currentLevel+1);
+      state='playing';
+    }
+    clearJustPressed(); return;
+  }
+  if (state==='victory') {
+    stateTimer++;
+    if (stateTimer>300 && (justPressed['Space']||justPressed['Enter'])) state='title';
+    clearJustPressed(); return;
+  }
+
+  if (!P.alive) { clearJustPressed(); return; }
+
+  updateEUC();
+  collide();
+
+  if (P.y > LH*T+80) { P.gearTier=0; P.iFrames=0; die(); }
+  if (P.x < cam.x) P.x = cam.x;
+
+  const lead = P.vx*15;
+  const targetCam = P.x - W/3 + lead;
+  cam.x += (targetCam-cam.x)*0.06;
+  if (cam.x<0) cam.x=0;
+
+  screenShake *= 0.8;
+
+  // Goombas
+  for (const g of goombas) {
+    if (!g.alive) { g.squish--; continue; }
+    g.frame += 0.06;
+    const feetY = g.y+28;
+    const onSolidL = solid(tileAt(g.x+4,feetY+1));
+    const onSolidR = solid(tileAt(g.x+24,feetY+1));
+    const grounded = onSolidL||onSolidR;
+    if (grounded) {
+      g.y = Math.floor(feetY/T)*T-28; g.vy=0; g.x+=g.vx;
+      const aheadX = g.vx>0 ? g.x+28 : g.x;
+      if (!solid(tileAt(aheadX,g.y+30))) g.vx*=-1;
+    } else {
+      g.vy+=0.5; if(g.vy>8)g.vy=8; g.y+=g.vy; g.x+=g.vx;
+      const newFeetY=g.y+28, landTileY=Math.floor(newFeetY/T);
+      const tL=Math.floor((g.x+4)/T), tR=Math.floor((g.x+24)/T);
+      for(let tx=tL;tx<=tR;tx++){
+        if(tx>=0&&tx<LW&&landTileY>=0&&landTileY<LH&&solid(level[landTileY]?.[tx])){
+          g.y=landTileY*T-28; g.vy=0; break;
+        }
+      }
+    }
+    if(g.vx>0&&solid(tileAt(g.x+28,g.y+14))) g.vx*=-1;
+    if(g.vx<0&&solid(tileAt(g.x,g.y+14))) g.vx*=-1;
+    if(P.alive&&overlap(P.x+3,P.y,P.w-6,P.h,g.x+2,g.y+2,24,24)){
+      if(P.vy>0&&P.y+P.h-10<g.y+14){
+        g.alive=false;g.squish=40;P.vy=-10;P.score+=100;
+        floatTexts.push({x:g.x+14,y:g.y-10,text:'+100',t:40,vy:-1.8});screenShake=4;
+      } else die();
+    }
+  }
+  goombas = goombas.filter(g=>g.alive||g.squish>0);
+
+  // Coins
+  for(const c of coinItems){
+    if(c.collected) continue;
+    if(overlap(P.x,P.y,P.w,P.h,c.x-10,c.y-10,20,20)){
+      c.collected=true; P.coins++; P.score+=100;
+      spawnParticles(c.x,c.y,'#f8d878',6,3,3);
+      floatTexts.push({x:c.x,y:c.y-12,text:'+100',t:35,vy:-1.5});
+    }
+  }
+
+  // Wheel upgrades
+  for(const wp of wheelPickups){
+    if(wp.collected) continue;
+    if(overlap(P.x,P.y,P.w,P.h,wp.x-16,wp.y-16,32,32)){
+      wp.collected=true;
+      if(wp.tier > P.wheelTier){
+        P.wheelTier=wp.tier; P.score+=2000;
+        upgradeFlash=120; upgradeFlashText=WHEELS[wp.tier].name;
+        floatTexts.push({x:wp.x,y:wp.y-20,text:'NEW WHEEL!',t:80,vy:-1});
+        spawnParticles(wp.x,wp.y,WHEELS[wp.tier].led,15,8,5);
+        screenShake=4;
+      }
+    }
+  }
+
+  // Gear pickups
+  for(const gp of gearPickups){
+    if(gp.collected) continue;
+    if(overlap(P.x,P.y,P.w,P.h,gp.x-12,gp.y-12,24,24)){
+      gp.collected=true;
+      if(P.gearTier<GEAR_LEVELS.length-1){
+        P.gearTier++; P.score+=500;
+        floatTexts.push({x:gp.x,y:gp.y-16,text:GEAR_LEVELS[P.gearTier].name,t:60,vy:-1.2});
+        spawnParticles(gp.x,gp.y,'#88aaff',8,4,3);
+      }
+    }
+  }
+
+  // Upgrade flash timer
+  if(upgradeFlash>0) upgradeFlash--;
+
+  // Win trigger (parameterized)
+  const def = LEVELS[currentLevel];
+  if (P.x>def.winZone.x1*T && P.x<def.winZone.x2*T && state==='playing') {
+    state='win'; stateTimer=0; P.score+=5000;
+  }
+
+  // Particles
+  for(const pt of particles){pt.x+=pt.vx;pt.y+=pt.vy;pt.vy+=0.12;pt.life--;}
+  particles=particles.filter(pt=>pt.life>0);
+  for(const ft of floatTexts){ft.y+=ft.vy;ft.t--;}
+  floatTexts=floatTexts.filter(ft=>ft.t>0);
+
+  // Speed trail
+  if(Math.abs(P.vx)>4.5&&P.onGround&&time%2===0){
+    particles.push({x:P.x+P.w/2-P.vx*0.5,y:P.y+P.h-4,vx:-P.vx*0.15,vy:-0.3,color:'rgba(200,200,200,0.5)',life:15,maxLife:15,size:3});
+  }
+
+  if(keys['KeyR']) state='title';
+  clearJustPressed();
+}
+
+function die() {
+  if (P.iFrames > 0) return;
+  if (P.gearTier > 0) {
+    // Gear absorbs the hit
+    P.gearTier--;
+    P.iFrames = 90;
+    P.vy = -8;
+    screenShake = 6;
+    const gearName = GEAR_LEVELS[P.gearTier+1].name;
+    floatTexts.push({x:P.x+P.w/2,y:P.y-20,text:gearName+' lost!',t:60,vy:-1.2});
+    spawnParticles(P.x+P.w/2, P.y+P.h/2, '#ff8888', 10, 6, 4);
+    return;
+  }
+  P.alive=false; P.vy=-10; P.vx=0;
+  state='dead'; stateTimer=0; screenShake=8;
+}
+function overlap(x1,y1,w1,h1,x2,y2,w2,h2){return x1<x2+w2&&x1+w1>x2&&y1<y2+h2&&y1+h1>y2;}
+function clearJustPressed(){for(const k in justPressed) delete justPressed[k];}
+
+// ============================================================
+//  DRAWING - PREMIUM EDITION
+// ============================================================
+const _cache = {};
+function getCached(key,w,h,drawFn){
+  if(!_cache[key]){const c=document.createElement('canvas');c.width=w;c.height=h;drawFn(c.getContext('2d'));_cache[key]=c;}
+  return _cache[key];
+}
+
+function draw() {
+  // Reset transform and apply responsive scaling
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.translate(canvasOffX, canvasOffY);
+  ctx.scale(canvasScale, canvasScale);
+
+  const sx = screenShake>0.5?(Math.random()-0.5)*screenShake:0;
+  const sy = screenShake>0.5?(Math.random()-0.5)*screenShake:0;
+  ctx.save();
+  ctx.translate(sx,sy);
+
+  const theme = THEMES[currentTheme];
+
+  // Sky
+  const skyGrad = ctx.createLinearGradient(0,0,0,H);
+  for(const[stop,color] of theme.sky) skyGrad.addColorStop(stop,color);
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0,0,W,H);
+
+  // Sun glow
+  if(theme.showSun){
+    const sunX=W*0.8,sunY=60;
+    const sunGrad=ctx.createRadialGradient(sunX,sunY,10,sunX,sunY,200);
+    sunGrad.addColorStop(0,'rgba(255,255,220,0.4)');
+    sunGrad.addColorStop(0.3,'rgba(255,240,180,0.15)');
+    sunGrad.addColorStop(1,'rgba(255,240,180,0)');
+    ctx.fillStyle=sunGrad; ctx.fillRect(0,0,W,H);
+  }
+
+  const cx = Math.floor(cam.x);
+
+  if(theme.showMountains) drawBgMountains(cx);
+  if(theme.showClouds) drawBgClouds(cx);
+  if(theme.showHills) drawBgHills(cx);
+  if(theme.showBushes) drawBgBushes(cx);
+
+  // Tiles
+  const sx0=Math.floor(cx/T);
+  const sx1=sx0+Math.ceil(W/T)+2;
+  for(let ty=0;ty<LH;ty++){
+    for(let tx=sx0;tx<sx1&&tx<LW;tx++){
+      const t=level[ty][tx];
+      if(t) drawTile(t,tx*T-cx,ty*T,tx,ty);
+    }
+  }
+
+  // Lava glow for castle
+  if(theme.lavaGlow) drawLavaGlow(cx);
+
+  // Flagpole
+  drawFlagpole(LEVELS[currentLevel].flagpoleX*T - cx);
+
+  // Coins
+  for(const c of coinItems) if(!c.collected) drawCoinSprite(c.x-cx,c.y,c.bobOffset);
+
+  // Wheel pickups
+  for(const wp of wheelPickups) if(!wp.collected) drawWheelPickup(wp.x-cx,wp.y,wp.tier);
+
+  // Gear pickups
+  for(const gp of gearPickups) if(!gp.collected) drawGearPickup(gp.x-cx,gp.y,gp.bobOffset);
+
+  // Goombas
+  for(const g of goombas) drawGoomba(g,g.x-cx,g.y);
+
+  // Particles
+  for(const pt of particles){
+    const a=Math.max(0,pt.life/(pt.maxLife||30));
+    ctx.globalAlpha=a*0.5; ctx.fillStyle=pt.color;
+    ctx.beginPath();ctx.arc(pt.x-cx,pt.y,pt.size*3*a,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=a; ctx.fillStyle='#fff';
+    ctx.beginPath();ctx.arc(pt.x-cx,pt.y,pt.size*(0.5+a*0.5)*0.6,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  // Float texts
+  ctx.textAlign='center';
+  for(const ft of floatTexts){
+    const a=Math.min(1,ft.t/15);
+    ctx.globalAlpha=a; ctx.font='bold 14px sans-serif';
+    ctx.shadowColor='#f8d040'; ctx.shadowBlur=8; ctx.fillStyle='#fff';
+    ctx.fillText(ft.text,ft.x-cx,ft.y); ctx.shadowBlur=0;
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=2;
+    ctx.strokeText(ft.text,ft.x-cx,ft.y); ctx.fillText(ft.text,ft.x-cx,ft.y);
+  }
+  ctx.globalAlpha=1; ctx.textAlign='left';
+
+  // Player
+  if(state!=='title'&&state!=='levelClear'&&state!=='victory') drawMario(P.x-cx,P.y,state==='dead');
+
+  // Atmospheric haze
+  const hazeGrad=ctx.createLinearGradient(0,13*T-20,0,13*T+10);
+  hazeGrad.addColorStop(0,'rgba(0,0,0,0)');
+  hazeGrad.addColorStop(1,theme.hazeColor);
+  ctx.fillStyle=hazeGrad; ctx.fillRect(0,13*T-20,W,30);
+
+  // Vignette
+  const vigGrad=ctx.createRadialGradient(W/2,H/2,H*0.4,W/2,H/2,H*0.85);
+  vigGrad.addColorStop(0,'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1,`rgba(0,0,0,${theme.vignetteAlpha})`);
+  ctx.fillStyle=vigGrad; ctx.fillRect(0,0,W,H);
+
+  ctx.restore();
+
+  // Upgrade flash overlay
+  if(upgradeFlash>0){
+    const uf=upgradeFlash/120;
+    const w=WHEELS[P.wheelTier];
+    ctx.fillStyle=`rgba(${hexToR(w.led)},${hexToG(w.led)},${hexToB(w.led)},${0.12*uf})`;
+    ctx.fillRect(0,0,W,H);
+    if(upgradeFlash>60){
+      ctx.textAlign='center';ctx.font='bold 22px system-ui, sans-serif';
+      ctx.shadowColor=w.led;ctx.shadowBlur=15;
+      ctx.fillStyle=`rgba(255,255,255,${(upgradeFlash-60)/60})`;
+      ctx.fillText(upgradeFlashText,W/2,H/2-40);
+      ctx.font='bold 14px system-ui, sans-serif';
+      ctx.fillStyle=`rgba(${hexToR(w.led)},${hexToG(w.led)},${hexToB(w.led)},${(upgradeFlash-60)/60})`;
+      ctx.fillText(w.desc,W/2,H/2-15);
+      ctx.shadowBlur=0;ctx.textAlign='left';
+    }
+  }
+
+  // iFrames blink
+  if(P.iFrames>0&&P.iFrames%6<3&&state==='playing'){
+    ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(0,0,W,H);
+  }
+
+  drawHUD();
+  if(state==='title') drawTitle();
+  if(state==='win'&&stateTimer>70) drawWin();
+  if(state==='levelClear') drawLevelIntro();
+  if(state==='victory') drawVictory();
+  ctx.restore(); // match save from screen shake
+  drawTouchControls();
+  drawPortraitOverlay();
+}
+
+// ---- LAVA GLOW (castle theme) ----
+function drawLavaGlow(cx) {
+  const sx0=Math.floor(cx/T), sx1=sx0+Math.ceil(W/T)+2;
+  for(let tx=sx0;tx<sx1&&tx<LW;tx++){
+    if(level[13]&&level[13][tx]===0){
+      const px=tx*T-cx;
+      // Lava surface
+      const lavaY = 13*T;
+      const flicker = Math.sin(time*0.08+tx*0.5)*0.3+0.7;
+      const lg=ctx.createLinearGradient(px,lavaY+T,px,lavaY-T);
+      lg.addColorStop(0,`rgba(255,80,10,${0.2*flicker})`);
+      lg.addColorStop(0.5,`rgba(255,50,10,${0.08*flicker})`);
+      lg.addColorStop(1,'rgba(255,40,0,0)');
+      ctx.fillStyle=lg; ctx.fillRect(px,lavaY-T,T,T*2);
+      // Lava bubbles
+      if(Math.sin(time*0.05+tx*1.3)>0.7){
+        ctx.fillStyle=`rgba(255,200,50,${0.15*flicker})`;
+        ctx.beginPath();ctx.arc(px+16,lavaY+8,4,0,Math.PI*2);ctx.fill();
+      }
+    }
+  }
+}
+
+// ---- BACKGROUND (premium parallax) ----
+function drawBgMountains(cx) {
+  const groundY=13*T;
+  const farMts=[[0,110],[55,75],[120,100],[190,70],[260,90]];
+  for(const[tx,h]of farMts){
+    const x=tx*T-cx*0.08;
+    const g=ctx.createLinearGradient(x,groundY-h,x,groundY);
+    g.addColorStop(0,'#7aa8d8');g.addColorStop(0.7,'#90bce0');g.addColorStop(1,'#a8d0ea');
+    ctx.fillStyle=g;ctx.beginPath();
+    ctx.moveTo(x-h*1.8,groundY);ctx.lineTo(x-h*0.3,groundY-h*0.7);
+    ctx.lineTo(x,groundY-h);ctx.lineTo(x+h*0.4,groundY-h*0.65);ctx.lineTo(x+h*1.8,groundY);ctx.fill();
+    ctx.fillStyle='rgba(240,248,255,0.5)';ctx.beginPath();
+    ctx.moveTo(x-h*0.15,groundY-h*0.85);ctx.lineTo(x,groundY-h);ctx.lineTo(x+h*0.2,groundY-h*0.8);ctx.fill();
+  }
+  const nearMts=[[20,80],[80,55],[150,75],[220,60]];
+  for(const[tx,h]of nearMts){
+    const x=tx*T-cx*0.15;
+    const g=ctx.createLinearGradient(x,groundY-h,x,groundY);
+    g.addColorStop(0,'#6a9cd0');g.addColorStop(1,'#88b8e0');
+    ctx.fillStyle=g;ctx.beginPath();
+    ctx.moveTo(x-h*1.5,groundY);ctx.quadraticCurveTo(x-h*0.5,groundY-h*0.5,x,groundY-h);
+    ctx.quadraticCurveTo(x+h*0.5,groundY-h*0.5,x+h*1.5,groundY);ctx.fill();
+  }
+}
+
+function drawBgClouds(cx) {
+  const clouds=[[10,2.5,3,1],[22,1,2,0.8],[42,2,4,1.2],[65,1.5,2,0.7],[80,2,3,1],[100,1,4,1.1],[130,2.5,2,0.9],[155,1,3,0.8],[185,2,2,1],[210,1.5,3,1.1]];
+  for(const[tx,ty,w,s]of clouds){
+    const x=tx*T-cx*0.15+Math.sin(time*0.003+tx)*8;
+    const y=ty*T;
+    ctx.fillStyle='rgba(100,140,200,0.06)';
+    for(let i=0;i<w;i++){ctx.beginPath();ctx.arc(x+i*28*s+14,y+22,18*s,0,Math.PI*2);ctx.fill();}
+    for(let i=0;i<w;i++){
+      const cx2=x+i*28*s+14;
+      const grad=ctx.createRadialGradient(cx2-3,y+4,2,cx2,y+12,20*s);
+      grad.addColorStop(0,'rgba(255,255,255,0.98)');grad.addColorStop(1,'rgba(240,248,255,0.7)');
+      ctx.fillStyle=grad;ctx.beginPath();ctx.arc(cx2,y+14,18*s,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='rgba(255,255,255,0.95)';
+    for(let i=0;i<w;i++){ctx.beginPath();ctx.arc(x+i*28*s+14,y+5,13*s,0,Math.PI*2);ctx.fill();}
+  }
+}
+
+function drawBgHills(cx) {
+  const farHills=[[0,55],[40,35],[85,50],[130,40],[180,55],[230,40]];
+  for(const[tx,h]of farHills){
+    const x=tx*T-cx*0.25,y=13*T;
+    const g=ctx.createRadialGradient(x+h,y-h*0.5,5,x+h,y+10,h*1.8);
+    g.addColorStop(0,'#4acc4a');g.addColorStop(1,'#38aa38');
+    ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(x-10,y);ctx.quadraticCurveTo(x+h,y-h*1.05,x+h*2+10,y);ctx.fill();
+  }
+  const nearHills=[[8,65],[50,45],[90,60],[140,50],[195,65]];
+  for(const[tx,h]of nearHills){
+    const x=tx*T-cx*0.4,y=13*T;
+    const g=ctx.createRadialGradient(x+h*0.8,y-h*0.6,3,x+h,y+5,h*1.5);
+    g.addColorStop(0,'#40d040');g.addColorStop(0.6,'#30b830');g.addColorStop(1,'#28a028');
+    ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(x-5,y);ctx.quadraticCurveTo(x+h,y-h*1.1,x+h*2+5,y);ctx.fill();
+    ctx.fillStyle='rgba(100,240,100,0.15)';ctx.beginPath();ctx.arc(x+h*0.7,y-h*0.5,h*0.3,0,Math.PI*2);ctx.fill();
+  }
+}
+
+function drawBgBushes(cx) {
+  const bushes=[[12,3],[28,2],[52,4],[75,2],[98,3],[125,2],[158,3],[190,4]];
+  for(const[tx,size]of bushes){
+    const x=tx*T-cx*0.7,y=12.7*T;
+    ctx.fillStyle='rgba(0,60,0,0.1)';
+    for(let i=0;i<size;i++){ctx.beginPath();ctx.ellipse(x+i*14+2,y+10,11,5,0,0,Math.PI*2);ctx.fill();}
+    for(let i=0;i<size;i++){
+      const g=ctx.createRadialGradient(x+i*14-2,y-4,2,x+i*14,y+2,14);
+      g.addColorStop(0,'#45e045');g.addColorStop(1,'#28a828');
+      ctx.fillStyle=g;ctx.beginPath();ctx.arc(x+i*14,y,12,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='rgba(120,255,120,0.25)';
+    for(let i=0;i<size;i++){ctx.beginPath();ctx.arc(x+i*14-2,y-5,5,0,Math.PI*2);ctx.fill();}
+  }
+}
+
+// ---- TILES (premium + theme-aware) ----
+function drawTile(t,dx,dy,tx,ty) {
+  switch(t){
+    case 1: { // Ground
+      const isUnder = currentTheme==='underground';
+      const isCastle = currentTheme==='castle';
+      if(isUnder||isCastle){
+        // Stone/brick ground
+        const c1 = isCastle?'#484058':'#4a4a5a';
+        const c2 = isCastle?'#383048':'#3a3a4a';
+        const c3 = isCastle?'#302840':'#30303a';
+        const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+        g.addColorStop(0,c1);g.addColorStop(1,c2);
+        ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+        // Mortar
+        ctx.fillStyle=c3;
+        ctx.fillRect(dx+15,dy,2,T);ctx.fillRect(dx,dy+15,T,2);
+        // Subtle highlight
+        ctx.fillStyle='rgba(255,255,255,0.04)';
+        ctx.fillRect(dx,dy,T,1);
+        // Top edge for surface row
+        if(ty===13||(!level[ty-1]||level[ty-1][tx]===0)){
+          ctx.fillStyle=isCastle?'rgba(100,60,60,0.3)':'rgba(100,100,140,0.3)';
+          ctx.fillRect(dx,dy,T,2);
+        }
+      } else if(ty===13){
+        const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+        g.addColorStop(0,'#45d845');g.addColorStop(0.08,'#38c038');g.addColorStop(0.18,'#2ca02c');
+        g.addColorStop(0.18,'#c07828');g.addColorStop(0.5,'#a86020');g.addColorStop(1,'#905018');
+        ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+        const seed=(tx*13+7)%11;
+        ctx.fillStyle='#50e850';
+        for(let i=0;i<5;i++){const bx=dx+((seed+i*7)%T);ctx.fillRect(bx,dy-1,1,2+(seed+i)%4);}
+        ctx.fillStyle='#3ad03a';
+        for(let i=0;i<3;i++){const bx=dx+((seed+i*11+3)%T);ctx.fillRect(bx,dy,2,2+(seed+i)%3);}
+        ctx.fillStyle='rgba(100,255,100,0.3)';ctx.fillRect(dx,dy,T,1);
+      } else {
+        const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+        g.addColorStop(0,'#b86820');g.addColorStop(1,'#985018');
+        ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+        ctx.fillStyle='#a05818';
+        const s=(tx*7+ty*13)%17;
+        ctx.fillRect(dx+s%12+1,dy+(s*3)%12+1,10,8);
+        ctx.fillStyle='#906018';ctx.fillRect(dx+15,dy,2,T);ctx.fillRect(dx,dy+15,T,2);
+        ctx.fillStyle='rgba(255,200,150,0.06)';ctx.fillRect(dx,dy,T,1);
+      }
+      break;
+    }
+    case 2: { // Brick
+      const isCastle = currentTheme==='castle';
+      const isUnder = currentTheme==='underground';
+      const bc1 = isCastle?'#705060':isUnder?'#606878':'#e08838';
+      const bc2 = isCastle?'#584048':isUnder?'#505868':'#c87028';
+      const bc3 = isCastle?'#483040':isUnder?'#404858':'#a85818';
+      const bm = isCastle?'#382030':isUnder?'#303848':'#784010';
+      const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+      g.addColorStop(0,bc1);g.addColorStop(0.5,bc2);g.addColorStop(1,bc3);
+      ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+      ctx.fillStyle=bm;
+      ctx.fillRect(dx,dy+15,T,2);ctx.fillRect(dx+15,dy,2,15);
+      ctx.fillRect(dx+7,dy+17,2,15);ctx.fillRect(dx+23,dy+17,2,15);
+      ctx.fillStyle='rgba(255,255,255,0.1)';
+      ctx.fillRect(dx+1,dy+1,13,1);ctx.fillRect(dx+18,dy+1,13,1);
+      ctx.fillStyle='rgba(0,0,0,0.1)';
+      ctx.fillRect(dx+1,dy+13,13,2);ctx.fillRect(dx+18,dy+13,13,2);
+      break;
+    }
+    case 3: { // Question block
+      const hit=hitBlocks.has(tx+','+ty);
+      if(hit){
+        const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+        g.addColorStop(0,'#888');g.addColorStop(1,'#666');
+        ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+        ctx.fillStyle='rgba(0,0,0,0.15)';ctx.fillRect(dx+1,dy+1,T-2,T-2);
+        ctx.strokeStyle='#555';ctx.lineWidth=1;ctx.strokeRect(dx+0.5,dy+0.5,T-1,T-1);
+      } else {
+        const pulse=0.8+Math.sin(time*0.1)*0.2;
+        const g=ctx.createLinearGradient(dx,dy,dx,dy+T);
+        g.addColorStop(0,'#ffd848');g.addColorStop(0.5,'#f0b828');g.addColorStop(1,'#d09018');
+        ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+        ctx.fillStyle='rgba(255,240,180,0.35)';ctx.fillRect(dx+2,dy+2,T-4,2);ctx.fillRect(dx+2,dy+2,2,T-4);
+        ctx.fillStyle='rgba(0,0,0,0.15)';ctx.fillRect(dx+2,dy+T-4,T-4,2);ctx.fillRect(dx+T-4,dy+2,2,T-4);
+        ctx.fillStyle='#c08818';
+        [[5,5],[T-7,5],[5,T-7],[T-7,T-7]].forEach(([ox,oy])=>{ctx.beginPath();ctx.arc(dx+ox+1,dy+oy+1,2.5,0,Math.PI*2);ctx.fill();});
+        ctx.strokeStyle='#a07010';ctx.lineWidth=1.5;ctx.strokeRect(dx+0.5,dy+0.5,T-1,T-1);
+        const bob=Math.sin(time*0.08)*2;
+        ctx.font='bold 20px sans-serif';ctx.textAlign='center';
+        ctx.shadowColor=`rgba(255,220,100,${0.6*pulse})`;ctx.shadowBlur=10*pulse;
+        ctx.fillStyle='#fff';ctx.fillText('?',dx+T/2,dy+23+bob);ctx.shadowBlur=0;ctx.textAlign='left';
+      }
+      break;
+    }
+    case 4: case 5: { // Pipe top
+      const isLeft=t===4;const px=isLeft?dx-4:dx;const pw=T+4;
+      const g=ctx.createLinearGradient(px,dy,px+pw,dy);
+      g.addColorStop(0,'#148014');g.addColorStop(0.15,'#20a820');g.addColorStop(0.35,'#38d838');
+      g.addColorStop(0.5,'#30c030');g.addColorStop(0.7,'#20a020');g.addColorStop(0.85,'#189018');g.addColorStop(1,'#107010');
+      ctx.fillStyle=g;ctx.fillRect(px,dy,pw,T);
+      ctx.fillStyle='rgba(120,255,120,0.3)';ctx.fillRect(px+2,dy+1,pw-4,2);
+      ctx.fillStyle='rgba(0,40,0,0.2)';ctx.fillRect(px,dy+T-2,pw,2);
+      ctx.fillStyle='rgba(200,255,200,0.15)';ctx.fillRect(px+pw*0.2,dy+3,4,T-6);
+      break;
+    }
+    case 6: case 7: { // Pipe body
+      const g=ctx.createLinearGradient(dx,dy,dx+T,dy);
+      g.addColorStop(0,'#148014');g.addColorStop(0.2,'#22a822');g.addColorStop(0.4,'#30cc30');
+      g.addColorStop(0.55,'#28b828');g.addColorStop(0.75,'#1c981c');g.addColorStop(1,'#107010');
+      ctx.fillStyle=g;ctx.fillRect(dx,dy,T,T);
+      ctx.fillStyle='rgba(180,255,180,0.12)';ctx.fillRect(dx+8,dy,3,T);
+      ctx.fillStyle='rgba(0,30,0,0.1)';
+      if(t===6) ctx.fillRect(dx,dy,2,T);
+      if(t===7) ctx.fillRect(dx+T-2,dy,2,T);
+      break;
+    }
+  }
+}
+
+// ---- FLAGPOLE (premium) ----
+function drawFlagpole(dx) {
+  ctx.fillStyle='rgba(0,0,0,0.1)';ctx.fillRect(dx+19,3*T,3,10*T);
+  const pg=ctx.createLinearGradient(dx+13,0,dx+20,0);
+  pg.addColorStop(0,'#aaa');pg.addColorStop(0.3,'#eee');pg.addColorStop(0.5,'#fff');
+  pg.addColorStop(0.7,'#ddd');pg.addColorStop(1,'#999');
+  ctx.fillStyle=pg;ctx.fillRect(dx+13,3*T,6,10*T);
+  const bg=ctx.createRadialGradient(dx+15,3*T-4,2,dx+16,3*T-2,8);
+  bg.addColorStop(0,'#ffe860');bg.addColorStop(0.7,'#d0a020');bg.addColorStop(1,'#a07810');
+  ctx.fillStyle=bg;ctx.beginPath();ctx.arc(dx+16,3*T-2,8,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,255,220,0.6)';ctx.beginPath();ctx.arc(dx+14,3*T-5,3,0,Math.PI*2);ctx.fill();
+  const wave=Math.sin(time*0.06)*5,wave2=Math.sin(time*0.06+1)*3;
+  const fg=ctx.createLinearGradient(dx-20,3*T+4,dx+14,3*T+32);
+  fg.addColorStop(0,'#28d028');fg.addColorStop(1,'#1a901a');
+  ctx.fillStyle=fg;ctx.beginPath();
+  ctx.moveTo(dx+14,3*T+4);ctx.quadraticCurveTo(dx-4+wave,3*T+12,dx-20+wave*0.7,3*T+17);
+  ctx.quadraticCurveTo(dx-8+wave2,3*T+24,dx+14,3*T+32);ctx.fill();
+  ctx.fillStyle='rgba(0,40,0,0.15)';ctx.beginPath();
+  ctx.moveTo(dx+14,3*T+10);ctx.quadraticCurveTo(dx+2+wave*0.5,3*T+18,dx+14,3*T+26);
+  ctx.lineTo(dx+14,3*T+10);ctx.fill();
+  ctx.fillStyle='#fff';ctx.shadowColor='#fff';ctx.shadowBlur=4;
+  ctx.font='11px sans-serif';ctx.textAlign='center';
+  ctx.fillText('★',dx+1+wave*0.3,3*T+22);ctx.shadowBlur=0;ctx.textAlign='left';
+}
+
+// ---- WHEEL PICKUP ----
+function drawWheelPickup(x, y, tier) {
+  const w = WHEELS[tier];
+  const bob = Math.sin(time*0.06)*4;
+  const dy = y + bob;
+  const r = 14 + tier;
+  // Glow
+  ctx.fillStyle = `rgba(${hexToR(w.led)},${hexToG(w.led)},${hexToB(w.led)},0.2)`;
+  ctx.beginPath(); ctx.arc(x, dy, r+10, 0, Math.PI*2); ctx.fill();
+  // Tire
+  const tg = ctx.createRadialGradient(x-2, dy-2, 1, x, dy, r);
+  tg.addColorStop(0, '#555'); tg.addColorStop(0.6, '#333'); tg.addColorStop(1, '#1a1a1a');
+  ctx.fillStyle = tg; ctx.beginPath(); ctx.arc(x, dy, r, 0, Math.PI*2); ctx.fill();
+  // Spokes
+  ctx.strokeStyle = 'rgba(80,80,80,0.5)'; ctx.lineWidth = 1;
+  for(let i=0;i<8;i++){const a=time*0.04+i*Math.PI/4;ctx.beginPath();ctx.moveTo(x+Math.cos(a)*5,dy+Math.sin(a)*5);ctx.lineTo(x+Math.cos(a)*(r-1),dy+Math.sin(a)*(r-1));ctx.stroke();}
+  // Hub
+  ctx.fillStyle='#888';ctx.beginPath();ctx.arc(x,dy,4,0,Math.PI*2);ctx.fill();
+  // Shell
+  const sw=8, sh=r*1.4, st=dy-sh/2;
+  const sg=ctx.createLinearGradient(x-sw/2,0,x+sw/2,0);
+  sg.addColorStop(0,w.shell);sg.addColorStop(0.5,'#555');sg.addColorStop(1,w.shell);
+  ctx.fillStyle=sg;ctx.fillRect(x-sw/2,st,sw,sh);
+  // LED strip
+  const pulse = 0.7+Math.sin(time*0.1)*0.3;
+  ctx.fillStyle=w.led;ctx.shadowColor=w.led;ctx.shadowBlur=10*pulse;
+  ctx.fillRect(x-sw/2+1,st+2,sw-2,3);ctx.shadowBlur=0;
+  // Tail LED
+  ctx.fillStyle=w.led2;ctx.shadowColor=w.led2;ctx.shadowBlur=6;
+  ctx.fillRect(x-sw/2+1,st+sh-5,sw-2,2);ctx.shadowBlur=0;
+  // Label
+  ctx.font='bold 8px system-ui';ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,255,255,0.8)';ctx.fillText(w.name,x,dy-r-6);
+  ctx.textAlign='left';
+}
+
+function hexToR(h){return parseInt(h.slice(1,3),16);}
+function hexToG(h){return parseInt(h.slice(3,5),16);}
+function hexToB(h){return parseInt(h.slice(5,7),16);}
+
+// ---- GEAR PICKUP ----
+function drawGearPickup(x, y, offset) {
+  const bob = Math.sin(time*0.07+offset)*3;
+  const dy = y + bob;
+  const pulse = 0.7+Math.sin(time*0.1)*0.3;
+  // Shield glow
+  ctx.fillStyle=`rgba(100,150,255,${0.15*pulse})`;
+  ctx.beginPath();ctx.arc(x,dy,16,0,Math.PI*2);ctx.fill();
+  // Shield shape
+  const sg=ctx.createLinearGradient(x-10,dy-12,x+10,dy+12);
+  sg.addColorStop(0,'#6688dd');sg.addColorStop(0.5,'#4466bb');sg.addColorStop(1,'#335599');
+  ctx.fillStyle=sg;ctx.beginPath();
+  ctx.moveTo(x,dy-12);ctx.lineTo(x+10,dy-6);ctx.lineTo(x+10,dy+2);
+  ctx.quadraticCurveTo(x+8,dy+12,x,dy+14);ctx.quadraticCurveTo(x-8,dy+12,x-10,dy+2);
+  ctx.lineTo(x-10,dy-6);ctx.closePath();ctx.fill();
+  // Shield highlight
+  ctx.fillStyle='rgba(255,255,255,0.2)';ctx.beginPath();
+  ctx.moveTo(x-2,dy-10);ctx.lineTo(x+6,dy-5);ctx.lineTo(x+6,dy);
+  ctx.quadraticCurveTo(x+2,dy+4,x-2,dy+2);ctx.closePath();ctx.fill();
+  // Cross/plus symbol
+  ctx.fillStyle='#fff';ctx.fillRect(x-1.5,dy-6,3,10);ctx.fillRect(x-4,dy-2,8,3);
+  // Border
+  ctx.strokeStyle='rgba(255,255,255,0.4)';ctx.lineWidth=1;ctx.beginPath();
+  ctx.moveTo(x,dy-12);ctx.lineTo(x+10,dy-6);ctx.lineTo(x+10,dy+2);
+  ctx.quadraticCurveTo(x+8,dy+12,x,dy+14);ctx.quadraticCurveTo(x-8,dy+12,x-10,dy+2);
+  ctx.lineTo(x-10,dy-6);ctx.closePath();ctx.stroke();
+}
+
+// ---- COIN ----
+function drawCoinSprite(x,y,offset) {
+  const phase=time*0.07+offset;const stretch=Math.abs(Math.sin(phase));
+  const w=7*stretch+1.5;const bob=Math.sin(phase*0.8)*3;
+  ctx.fillStyle=`rgba(255,220,80,${0.15+stretch*0.1})`;
+  ctx.beginPath();ctx.arc(x,y+bob,12,0,Math.PI*2);ctx.fill();
+  const cg=ctx.createLinearGradient(x-w,y+bob,x+w,y+bob);
+  cg.addColorStop(0,'#c89818');cg.addColorStop(0.3,'#f8d848');cg.addColorStop(0.5,'#ffe878');
+  cg.addColorStop(0.7,'#f8d040');cg.addColorStop(1,'#c09018');
+  ctx.fillStyle=cg;ctx.beginPath();ctx.ellipse(x,y+bob,w,8,0,0,Math.PI*2);ctx.fill();
+  if(stretch>0.3){ctx.fillStyle='rgba(255,255,220,0.4)';ctx.beginPath();ctx.ellipse(x-1,y+bob-1,w*0.4,4.5,0,0,Math.PI*2);ctx.fill();}
+  ctx.strokeStyle='#a07810';ctx.lineWidth=0.8;ctx.beginPath();ctx.ellipse(x,y+bob,w,8,0,0,Math.PI*2);ctx.stroke();
+}
+
+// ---- GOOMBA ----
+function drawGoomba(g,dx,dy) {
+  if(!g.alive){ctx.fillStyle='#a05020';ctx.fillRect(dx+2,dy+22,24,6);ctx.fillStyle='#000';ctx.fillRect(dx+7,dy+23,3,2);ctx.fillRect(dx+18,dy+23,3,2);return;}
+  ctx.fillStyle='rgba(0,0,0,0.2)';ctx.beginPath();ctx.ellipse(dx+14,dy+29,13,4,0,0,Math.PI*2);ctx.fill();
+  const bg=ctx.createRadialGradient(dx+14,dy+6,3,dx+14,dy+16,18);
+  bg.addColorStop(0,'#e88050');bg.addColorStop(0.5,'#c06030');bg.addColorStop(1,'#804020');
+  ctx.fillStyle=bg;ctx.beginPath();ctx.arc(dx+14,dy+10,14,Math.PI,0);ctx.fill();
+  const lg=ctx.createLinearGradient(dx,dy+10,dx,dy+24);
+  lg.addColorStop(0,'#c06030');lg.addColorStop(1,'#904020');
+  ctx.fillStyle=lg;ctx.fillRect(dx+2,dy+10,24,14);
+  ctx.fillStyle='rgba(255,180,140,0.2)';ctx.beginPath();ctx.arc(dx+10,dy+6,6,0,Math.PI*2);ctx.fill();
+  const walk=Math.sin(g.frame*Math.PI)*3;
+  const footGrad=ctx.createLinearGradient(0,dy+22,0,dy+29);
+  footGrad.addColorStop(0,'#583018');footGrad.addColorStop(1,'#402010');
+  ctx.fillStyle=footGrad;
+  ctx.beginPath();ctx.ellipse(dx+7+walk,dy+26,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(dx+21-walk,dy+26,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.ellipse(dx+8,dy+10,4.5,5,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(dx+20,dy+10,4.5,5,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#111';const look=g.vx>0?1.5:-1.5;
+  ctx.beginPath();ctx.arc(dx+9+look,dy+11,2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(dx+21+look,dy+11,2.5,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.arc(dx+8+look,dy+10,1,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(dx+20+look,dy+10,1,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#301008';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(dx+3,dy+4);ctx.lineTo(dx+13,dy+7);ctx.lineTo(dx+13,dy+5.5);ctx.lineTo(dx+3,dy+2.5);ctx.fill();
+  ctx.beginPath();ctx.moveTo(dx+25,dy+4);ctx.lineTo(dx+15,dy+7);ctx.lineTo(dx+15,dy+5.5);ctx.lineTo(dx+25,dy+2.5);ctx.fill();
+}
+
+// ---- MARIO ON EUC (premium) ----
+function drawMario(dx,dy,dead) {
+  const p=P;
+  // iFrames blink - skip drawing every other frame
+  if(p.iFrames>0&&p.iFrames%6<3&&!dead) { return; }
+  ctx.save();
+  const wSpec=WHEELS[p.wheelTier||0];
+  const cx=dx+p.w/2,cy=dy+p.h*0.6;
+  const leanAngle=p.lean*0.22+p.tiltback*0.12*-Math.sign(p.vx);
+  ctx.translate(cx,cy);ctx.rotate(leanAngle);if(dead)ctx.rotate(time*0.12);ctx.translate(-cx,-cy);
+  const squashX=1+p.landSquash*0.3,squashY=1-p.landSquash*0.3;
+  ctx.translate(cx,dy+p.h);ctx.scale(squashX,squashY);ctx.translate(-cx,-(dy+p.h));
+  const speed=Math.abs(p.vx);
+  const eucX=cx,eucBottom=dy+p.h,wheelR=11,wheelY=eucBottom-wheelR;
+  // Shadow
+  const shadowGrad=ctx.createRadialGradient(eucX,eucBottom+3,2,eucX,eucBottom+3,20);
+  shadowGrad.addColorStop(0,'rgba(0,0,0,0.25)');shadowGrad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=shadowGrad;ctx.beginPath();ctx.ellipse(eucX,eucBottom+3,20,5,0,0,Math.PI*2);ctx.fill();
+  // Tire
+  const tireGrad=ctx.createRadialGradient(eucX-2,wheelY-2,1,eucX,wheelY,wheelR);
+  tireGrad.addColorStop(0,'#404040');tireGrad.addColorStop(0.6,'#2a2a2a');tireGrad.addColorStop(1,'#1a1a1a');
+  ctx.fillStyle=tireGrad;ctx.beginPath();ctx.arc(eucX,wheelY,wheelR,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='rgba(60,60,60,0.6)';ctx.lineWidth=1.5;
+  for(let i=0;i<10;i++){const a=p.wheelRot+i*Math.PI/5;ctx.beginPath();ctx.moveTo(eucX+Math.cos(a)*6,wheelY+Math.sin(a)*6);ctx.lineTo(eucX+Math.cos(a)*(wheelR-0.5),wheelY+Math.sin(a)*(wheelR-0.5));ctx.stroke();}
+  ctx.strokeStyle='#555';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(eucX,wheelY,5.5,0,Math.PI*2);ctx.stroke();
+  const hubGrad=ctx.createRadialGradient(eucX-1,wheelY-1,0.5,eucX,wheelY,4);
+  hubGrad.addColorStop(0,'#aaa');hubGrad.addColorStop(0.5,'#777');hubGrad.addColorStop(1,'#444');
+  ctx.fillStyle=hubGrad;ctx.beginPath();ctx.arc(eucX,wheelY,4,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#999';ctx.beginPath();ctx.arc(eucX,wheelY,1.5,0,Math.PI*2);ctx.fill();
+  // Shell (colored by wheel tier)
+  const shellW=11,shellH=25,shellTop=wheelY-shellH,shellX=eucX-shellW/2;
+  const shellGrad=ctx.createLinearGradient(shellX,shellTop,shellX+shellW,shellTop);
+  shellGrad.addColorStop(0,wSpec.shell);shellGrad.addColorStop(0.3,'#38383e');shellGrad.addColorStop(0.5,'#4a4a50');
+  shellGrad.addColorStop(0.7,'#38383e');shellGrad.addColorStop(1,wSpec.shell);
+  ctx.fillStyle=shellGrad;ctx.beginPath();
+  ctx.moveTo(shellX+3,shellTop);ctx.lineTo(shellX+shellW-3,shellTop);
+  ctx.quadraticCurveTo(shellX+shellW,shellTop,shellX+shellW,shellTop+3);ctx.lineTo(shellX+shellW,wheelY-3);
+  ctx.quadraticCurveTo(shellX+shellW,wheelY,shellX+shellW-3,wheelY);ctx.lineTo(shellX+3,wheelY);
+  ctx.quadraticCurveTo(shellX,wheelY,shellX,wheelY-3);ctx.lineTo(shellX,shellTop+3);
+  ctx.quadraticCurveTo(shellX,shellTop,shellX+3,shellTop);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.06)';ctx.fillRect(shellX+1,shellTop+4,2,shellH-8);
+  // LEDs (use wheel-specific colors)
+  if(speed>0.5||p.wheelTier>0){
+    const ledColor=p.tiltback>0.3?'#ff3333':wSpec.led;
+    ctx.fillStyle=ledColor;ctx.shadowColor=ledColor;ctx.shadowBlur=8;
+    ctx.fillRect(shellX+2,shellTop+2,shellW-4,3);ctx.shadowBlur=0;
+    ctx.fillStyle=wSpec.led2;ctx.shadowColor=wSpec.led2;ctx.shadowBlur=5;
+    ctx.fillRect(shellX+2,wheelY-5,shellW-4,2);ctx.shadowBlur=0;
+  }
+  // Pedals
+  const pedalY=wheelY-1,pedalW=13,pedalH=3;
+  const lPedalGrad=ctx.createLinearGradient(0,pedalY,0,pedalY+pedalH);
+  lPedalGrad.addColorStop(0,'#666');lPedalGrad.addColorStop(1,'#3a3a3a');
+  ctx.fillStyle=lPedalGrad;
+  ctx.fillRect(eucX-shellW/2-pedalW+2,pedalY,pedalW,pedalH);
+  ctx.fillRect(eucX+shellW/2-2,pedalY,pedalW,pedalH);
+  ctx.fillStyle='rgba(255,255,255,0.12)';
+  ctx.fillRect(eucX-shellW/2-pedalW+3,pedalY,pedalW-2,1);ctx.fillRect(eucX+shellW/2-1,pedalY,pedalW-2,1);
+  // Body
+  const bodyX=cx,feetY=pedalY-1;
+  const legGrad=ctx.createLinearGradient(bodyX-8,0,bodyX+8,0);
+  legGrad.addColorStop(0,'#1838b8');legGrad.addColorStop(0.5,'#2848d8');legGrad.addColorStop(1,'#1838b8');
+  ctx.fillStyle=legGrad;ctx.fillRect(bodyX-8,feetY-15,7,15);ctx.fillRect(bodyX+1,feetY-15,7,15);
+  // Shoes
+  const shoeGradL=ctx.createLinearGradient(bodyX-12,feetY-4,bodyX-12,feetY+1);
+  shoeGradL.addColorStop(0,'#a05520');shoeGradL.addColorStop(0.6,'#7a3a10');shoeGradL.addColorStop(1,'#5a2808');
+  ctx.fillStyle=shoeGradL;
+  ctx.beginPath();ctx.moveTo(bodyX-11,feetY-3);ctx.lineTo(bodyX-2,feetY-3);ctx.lineTo(bodyX-2,feetY);ctx.lineTo(bodyX-12,feetY);ctx.quadraticCurveTo(bodyX-13,feetY-1.5,bodyX-11,feetY-3);ctx.fill();
+  ctx.beginPath();ctx.moveTo(bodyX+2,feetY-3);ctx.lineTo(bodyX+11,feetY-3);ctx.quadraticCurveTo(bodyX+13,feetY-1.5,bodyX+12,feetY);ctx.lineTo(bodyX+2,feetY);ctx.fill();
+  // Torso
+  const torsoY=feetY-30;
+  const hasArmor=p.gearTier>=3;
+  const torsoGrad=ctx.createRadialGradient(bodyX,torsoY+6,2,bodyX,torsoY+8,16);
+  if(hasArmor){torsoGrad.addColorStop(0,'#555');torsoGrad.addColorStop(0.5,'#444');torsoGrad.addColorStop(1,'#333');}
+  else{torsoGrad.addColorStop(0,'#f03040');torsoGrad.addColorStop(0.5,'#e02030');torsoGrad.addColorStop(1,'#b01520');}
+  ctx.fillStyle=torsoGrad;ctx.fillRect(bodyX-9,torsoY,18,16);
+  if(hasArmor){ctx.fillStyle='rgba(200,60,60,0.4)';ctx.fillRect(bodyX-8,torsoY+1,16,3);ctx.fillStyle='rgba(255,255,255,0.1)';ctx.fillRect(bodyX-7,torsoY+1,14,1);}
+  const bibGrad=ctx.createLinearGradient(bodyX-6,torsoY+2,bodyX+6,torsoY+2);
+  bibGrad.addColorStop(0,'#1838b8');bibGrad.addColorStop(0.5,'#2848d8');bibGrad.addColorStop(1,'#1838b8');
+  ctx.fillStyle=bibGrad;ctx.fillRect(bodyX-5,torsoY+3,10,9);
+  ctx.fillStyle='#2040c8';ctx.fillRect(bodyX-6,torsoY+1,3,11);ctx.fillRect(bodyX+3,torsoY+1,3,11);
+  ctx.fillStyle='#f0c800';ctx.beginPath();ctx.arc(bodyX-4,torsoY+5,1.5,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.arc(bodyX+4,torsoY+5,1.5,0,Math.PI*2);ctx.fill();
+  // Arms
+  const armBaseY=torsoY+4,armLen=10,balanceAngle=p.armAngle;
+  const sleeveGrad=ctx.createLinearGradient(0,-3,0,4);sleeveGrad.addColorStop(0,'#f03040');sleeveGrad.addColorStop(1,'#c01828');
+  const hasWrists=p.gearTier>=1;
+  const handGrad=ctx.createRadialGradient(-armLen-1,0.5,0.5,-armLen-1,0.5,4);handGrad.addColorStop(0,'#ffd0c0');handGrad.addColorStop(1,'#f0a898');
+  ctx.save();ctx.translate(bodyX-9,armBaseY);ctx.rotate(-0.5-balanceAngle*1.2);
+  ctx.fillStyle=sleeveGrad;ctx.beginPath();ctx.ellipse(-armLen*0.5,0.5,armLen*0.55,3.5,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=handGrad;ctx.beginPath();ctx.ellipse(-armLen-1,0.5,3.5,3,0,0,Math.PI*2);ctx.fill();
+  if(hasWrists){ctx.fillStyle='#6677aa';ctx.beginPath();ctx.ellipse(-armLen+1,0.5,3,2.5,0,0,Math.PI*2);ctx.fill();}
+  ctx.restore();
+  ctx.save();ctx.translate(bodyX+9,armBaseY);ctx.rotate(0.5+balanceAngle*1.2);
+  ctx.fillStyle=sleeveGrad;ctx.beginPath();ctx.ellipse(armLen*0.5,0.5,armLen*0.55,3.5,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=handGrad;ctx.beginPath();ctx.ellipse(armLen+1,0.5,3.5,3,0,0,Math.PI*2);ctx.fill();
+  if(hasWrists){ctx.fillStyle='#6677aa';ctx.beginPath();ctx.ellipse(armLen-1,0.5,3,2.5,0,0,Math.PI*2);ctx.fill();}
+  ctx.restore();
+  // Head
+  const headY=torsoY-14;
+  const faceGrad=ctx.createRadialGradient(bodyX,headY+6,2,bodyX,headY+7,12);
+  faceGrad.addColorStop(0,'#ffe0d0');faceGrad.addColorStop(0.7,'#f8c0b0');faceGrad.addColorStop(1,'#e8a898');
+  ctx.fillStyle=faceGrad;ctx.beginPath();
+  ctx.moveTo(bodyX-7,headY+2);ctx.quadraticCurveTo(bodyX-7,headY,bodyX-5,headY);ctx.lineTo(bodyX+5,headY);
+  ctx.quadraticCurveTo(bodyX+7,headY,bodyX+7,headY+2);ctx.lineTo(bodyX+7,headY+12);
+  ctx.quadraticCurveTo(bodyX+7,headY+14,bodyX+5,headY+14);ctx.lineTo(bodyX-5,headY+14);
+  ctx.quadraticCurveTo(bodyX-7,headY+14,bodyX-7,headY+12);ctx.closePath();ctx.fill();
+  // Eyes
+  const eyeDir=p.facingRight?1:-1;
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.ellipse(bodyX-3+eyeDir,headY+5.5,3,3.5,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(bodyX+4+eyeDir,headY+5.5,3,3.5,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#1a1a6e';ctx.beginPath();ctx.arc(bodyX-2+eyeDir*2,headY+6,2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(bodyX+4.5+eyeDir*2,headY+6,2,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#000';ctx.beginPath();ctx.arc(bodyX-1.5+eyeDir*2,headY+6.2,1,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(bodyX+5+eyeDir*2,headY+6.2,1,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(bodyX-2.5+eyeDir,headY+4.5,0.8,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(bodyX+4+eyeDir,headY+4.5,0.8,0,Math.PI*2);ctx.fill();
+  // Nose
+  ctx.fillStyle='#e8a090';ctx.beginPath();ctx.ellipse(bodyX+eyeDir*4.5,headY+8.5,2.5,2,0,0,Math.PI*2);ctx.fill();
+  // Mustache
+  ctx.fillStyle='#4a2800';ctx.beginPath();const mBaseX=p.facingRight?bodyX-3:bodyX-8;
+  ctx.moveTo(mBaseX,headY+10);ctx.quadraticCurveTo(mBaseX+4,headY+13,mBaseX+6,headY+10.5);
+  ctx.quadraticCurveTo(mBaseX+8,headY+13,mBaseX+12,headY+10);ctx.quadraticCurveTo(mBaseX+8,headY+12,mBaseX+6,headY+11.5);
+  ctx.quadraticCurveTo(mBaseX+4,headY+12,mBaseX,headY+10);ctx.fill();
+  // Hat / Helmet
+  const hasHelmet=p.gearTier>=2;
+  if(hasHelmet){
+    // Full-face helmet
+    const hg=ctx.createLinearGradient(bodyX-8,headY-9,bodyX+8,headY+16);
+    hg.addColorStop(0,'#4466bb');hg.addColorStop(0.4,'#3355aa');hg.addColorStop(1,'#223388');
+    ctx.fillStyle=hg;ctx.beginPath();
+    ctx.moveTo(bodyX-8,headY+12);ctx.lineTo(bodyX-8,headY-4);ctx.quadraticCurveTo(bodyX-8,headY-9,bodyX,headY-9);
+    ctx.quadraticCurveTo(bodyX+8,headY-9,bodyX+8,headY-4);ctx.lineTo(bodyX+8,headY+12);
+    ctx.quadraticCurveTo(bodyX+8,headY+16,bodyX,headY+16);ctx.quadraticCurveTo(bodyX-8,headY+16,bodyX-8,headY+12);ctx.fill();
+    // Visor
+    ctx.fillStyle='rgba(100,200,255,0.3)';ctx.beginPath();
+    ctx.moveTo(bodyX-6,headY+2);ctx.lineTo(bodyX+6,headY+2);ctx.lineTo(bodyX+6,headY+8);
+    ctx.quadraticCurveTo(bodyX,headY+10,bodyX-6,headY+8);ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fillRect(bodyX-6,headY-7,12,2);
+  } else {
+    const hatGrad=ctx.createLinearGradient(bodyX-8,headY-7,bodyX-8,headY+1);
+    hatGrad.addColorStop(0,'#f03848');hatGrad.addColorStop(0.5,'#e02030');hatGrad.addColorStop(1,'#c01828');
+    ctx.fillStyle=hatGrad;ctx.beginPath();
+    ctx.moveTo(bodyX-7,headY);ctx.lineTo(bodyX-7,headY-4);ctx.quadraticCurveTo(bodyX-7,headY-7,bodyX-4,headY-7);
+    ctx.lineTo(bodyX+4,headY-7);ctx.quadraticCurveTo(bodyX+7,headY-7,bodyX+7,headY-4);ctx.lineTo(bodyX+7,headY);ctx.fill();
+    ctx.fillStyle=hatGrad;
+    if(p.facingRight){ctx.beginPath();ctx.moveTo(bodyX-5,headY-1);ctx.lineTo(bodyX+12,headY-1);ctx.quadraticCurveTo(bodyX+14,headY,bodyX+12,headY+2);ctx.lineTo(bodyX-5,headY+2);ctx.fill();}
+    else{ctx.beginPath();ctx.moveTo(bodyX+5,headY-1);ctx.lineTo(bodyX-12,headY-1);ctx.quadraticCurveTo(bodyX-14,headY,bodyX-12,headY+2);ctx.lineTo(bodyX+5,headY+2);ctx.fill();}
+    ctx.fillStyle='rgba(255,120,130,0.3)';ctx.fillRect(bodyX-5,headY-6,10,2);
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(bodyX,headY-3,3.5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#e02030';ctx.font='bold 6px sans-serif';ctx.textAlign='center';ctx.fillText('M',bodyX,headY-1);ctx.textAlign='left';
+    // Sideburns
+    ctx.fillStyle='#4a2800';
+    if(p.facingRight){ctx.beginPath();ctx.ellipse(bodyX-6.5,headY+3,2,4,0,0,Math.PI*2);ctx.fill();}
+    else{ctx.beginPath();ctx.ellipse(bodyX+6.5,headY+3,2,4,0,0,Math.PI*2);ctx.fill();}
+  }
+  // Speed lines
+  if(speed>5&&!dead){ctx.globalAlpha=(speed-5)/(MAX_SPEED-5)*0.3;ctx.strokeStyle='#fff';ctx.lineWidth=1;
+    for(let i=0;i<3;i++){const wy=dy+5+i*14;const wx=dx-5-i*4+(p.facingRight?-8:p.w+8);ctx.beginPath();ctx.moveTo(wx,wy);ctx.lineTo(wx+(p.facingRight?-12:12),wy);ctx.stroke();}
+    ctx.globalAlpha=1;}
+  ctx.restore();
+}
+
+// ---- HUD ----
+function drawHUD() {
+  ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(0,0,W,40);
+  ctx.fillStyle='rgba(255,255,255,0.03)';ctx.fillRect(0,0,W,1);
+  ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(0,39,W,1);
+  const wh = WHEELS[P.wheelTier||0];
+  const curMaxSpeed = MAX_SPEED * wh.spd;
+  const items=[
+    ['MARIO',String(P.score||0).padStart(6,'0')],
+    ['COINS','× '+String(P.coins||0).padStart(2,'0')],
+    ['WORLD',LEVELS[currentLevel].name],
+    ['EUC', wh.name],
+  ];
+  const spacing=W/items.length;
+  ctx.textAlign='center';
+  items.forEach(([label,val],i)=>{
+    const x=spacing*(i+0.5);
+    ctx.font='600 9px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.5)';ctx.fillText(label,x,14);
+    if(label==='EUC'){
+      ctx.font='bold 11px system-ui, sans-serif';ctx.fillStyle=wh.led;
+    } else {
+      ctx.font='bold 13px system-ui, sans-serif';ctx.fillStyle='#fff';
+    }
+    ctx.fillText(val,x,30);
+  });
+  // Gear indicator (shields)
+  if(state==='playing'&&P.gearTier>0){
+    const gx=10,gy=H-155;
+    ctx.font='9px system-ui, sans-serif';ctx.textAlign='left';
+    ctx.fillStyle='rgba(255,255,255,0.4)';ctx.fillText(GEAR_LEVELS[P.gearTier].name,gx+P.gearTier*14+6,gy+8);
+    for(let i=0;i<P.gearTier;i++){
+      const sx=gx+i*14;
+      ctx.fillStyle=i<2?'#5577cc':'#cc4444';
+      ctx.beginPath();ctx.moveTo(sx+5,gy);ctx.lineTo(sx+10,gy+3);ctx.lineTo(sx+10,gy+7);
+      ctx.quadraticCurveTo(sx+8,gy+12,sx+5,gy+13);ctx.quadraticCurveTo(sx+2,gy+12,sx,gy+7);
+      ctx.lineTo(sx,gy+3);ctx.closePath();ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,0.3)';ctx.fillRect(sx+4,gy+3,2,6);ctx.fillRect(sx+2,gy+5,6,2);
+    }
+  }
+  if(P.tiltback>0.3&&state==='playing'){
+    const pulse=(Math.sin(time*0.3)+1)*0.5;
+    ctx.fillStyle=`rgba(255,50,50,${0.15*pulse})`;ctx.fillRect(0,40,W,25);
+    ctx.font='bold 12px system-ui, sans-serif';ctx.textAlign='center';
+    ctx.fillStyle=`rgba(255,100,100,${0.5+pulse*0.5})`;
+    ctx.fillText('⚠ TILT-BACK WARNING ⚠',W/2,56);
+  }
+  if(state==='playing'){
+    const gx=W-70,gy=H-155;const speedPct=Math.min(Math.abs(P.vx)/curMaxSpeed,1);const barW=55,barH=5;
+    ctx.fillStyle='rgba(0,0,0,0.4)';roundRectFill(gx,gy,barW,barH,2.5);
+    const barGrad=ctx.createLinearGradient(gx,gy,gx+barW,gy);
+    barGrad.addColorStop(0,'#44ee44');barGrad.addColorStop(0.6,'#eecc22');barGrad.addColorStop(1,'#ff3333');
+    ctx.fillStyle=barGrad;ctx.save();ctx.beginPath();ctx.rect(gx,gy,barW*speedPct,barH);ctx.clip();
+    roundRectFill(gx,gy,barW,barH,2.5);ctx.restore();
+    if(speedPct>0.1){ctx.fillStyle='rgba(255,255,255,0.4)';ctx.beginPath();ctx.arc(gx+barW*speedPct,gy+barH/2,3,0,Math.PI*2);ctx.fill();}
+    const curTiltback = TILTBACK_SPEED * wh.tb;
+    const tbX=gx+barW*(curTiltback/curMaxSpeed);ctx.fillStyle='rgba(255,100,100,0.7)';ctx.fillRect(tbX,gy-3,1,barH+6);
+    ctx.font='8px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';ctx.textAlign='right';ctx.fillText('PWR',gx-4,gy+5);
+  }
+  ctx.textAlign='left';
+}
+
+function roundRectFill(x,y,w,h,r) {
+  ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r);ctx.lineTo(x+w,y+h-r);
+  ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);ctx.lineTo(x+r,y+h);
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r);ctx.lineTo(x,y+r);
+  ctx.quadraticCurveTo(x,y,x+r,y);ctx.fill();
+}
+
+// ---- TITLE SCREEN ----
+function drawTitle() {
+  const overlayGrad=ctx.createLinearGradient(0,0,0,H);
+  overlayGrad.addColorStop(0,'rgba(0,0,20,0.82)');overlayGrad.addColorStop(0.5,'rgba(0,0,10,0.72)');overlayGrad.addColorStop(1,'rgba(0,0,20,0.85)');
+  ctx.fillStyle=overlayGrad;ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  // Subtle rays
+  ctx.save();ctx.globalAlpha=0.03;
+  for(let i=0;i<8;i++){const a=time*0.005+i*Math.PI/4;ctx.fillStyle='#f8d040';ctx.beginPath();ctx.moveTo(W/2,100);ctx.lineTo(W/2+Math.cos(a)*500,100+Math.sin(a)*500);ctx.lineTo(W/2+Math.cos(a+0.12)*500,100+Math.sin(a+0.12)*500);ctx.fill();}
+  ctx.restore();
+  // Title
+  ctx.save();ctx.font='bold 42px sans-serif';
+  ctx.fillStyle='#600810';ctx.fillText('SUPER MARIO',W/2+2,72);
+  ctx.fillStyle='#f03040';ctx.fillText('SUPER MARIO',W/2,70);
+  ctx.globalAlpha=0.25;ctx.fillStyle='#ff8090';ctx.fillText('SUPER MARIO',W/2,69);ctx.globalAlpha=1;
+  ctx.font='bold 54px sans-serif';ctx.shadowColor='rgba(248,208,64,0.5)';ctx.shadowBlur=15;
+  ctx.fillStyle='#806010';ctx.fillText('E.U.C.',W/2+2,125);
+  ctx.fillStyle='#f8d040';ctx.fillText('E.U.C.',W/2,123);ctx.shadowBlur=0;
+  ctx.globalAlpha=0.2;ctx.fillStyle='#fff8d0';ctx.fillText('E.U.C.',W/2,122);ctx.globalAlpha=1;ctx.restore();
+  ctx.font='600 11px system-ui, sans-serif';ctx.fillStyle='rgba(200,200,220,0.6)';ctx.fillText('ELECTRIC  UNICYCLE  EDITION',W/2,146);
+  ctx.fillStyle='rgba(248,208,64,0.25)';ctx.fillRect(W/2-80,152,160,1);
+
+  // === WHEELS SHOWCASE ===
+  ctx.font='bold 10px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText('FIND UPGRADED WHEELS',W/2,172);
+
+  const wheelY=210, wheelSpacing=W/(WHEELS.length+1);
+  for(let i=0;i<WHEELS.length;i++){
+    const wx=wheelSpacing*(i+1);
+    const w=WHEELS[i];
+    const isHighlight=Math.floor(time/60)%WHEELS.length===i;
+    const bob=isHighlight?Math.sin(time*0.1)*3:0;
+    const alpha=isHighlight?1:0.55;
+    ctx.globalAlpha=alpha;
+    // Mini tire
+    const tr=12+i*0.8;
+    ctx.fillStyle='#222';ctx.beginPath();ctx.arc(wx,wheelY+bob,tr,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(60,60,60,0.4)';ctx.lineWidth=1;
+    for(let j=0;j<6;j++){const a=time*0.03+j*Math.PI/3;ctx.beginPath();ctx.moveTo(wx+Math.cos(a)*4,wheelY+bob+Math.sin(a)*4);ctx.lineTo(wx+Math.cos(a)*(tr-1),wheelY+bob+Math.sin(a)*(tr-1));ctx.stroke();}
+    ctx.fillStyle='#666';ctx.beginPath();ctx.arc(wx,wheelY+bob,3,0,Math.PI*2);ctx.fill();
+    // Mini shell
+    const msw=6,msh=tr*1.2,mst=wheelY+bob-msh/2;
+    const sg=ctx.createLinearGradient(wx-msw/2,0,wx+msw/2,0);
+    sg.addColorStop(0,w.shell);sg.addColorStop(0.5,'#444');sg.addColorStop(1,w.shell);
+    ctx.fillStyle=sg;ctx.fillRect(wx-msw/2,mst,msw,msh);
+    // LED
+    ctx.fillStyle=w.led;ctx.shadowColor=w.led;ctx.shadowBlur=isHighlight?8:4;
+    ctx.fillRect(wx-msw/2+1,mst+1,msw-2,2);ctx.shadowBlur=0;
+    ctx.fillStyle=w.led2;ctx.fillRect(wx-msw/2+1,mst+msh-3,msw-2,1.5);
+    // Pedals
+    ctx.fillStyle='#555';ctx.fillRect(wx-msw/2-6,wheelY+bob-1,7,2);ctx.fillRect(wx+msw/2-1,wheelY+bob-1,7,2);
+    // Label
+    ctx.font='bold 7px system-ui, sans-serif';ctx.fillStyle=isHighlight?w.led:'rgba(255,255,255,0.6)';
+    ctx.fillText(w.name,wx,wheelY+bob+tr+10);
+    // Speed stat
+    ctx.font='6px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.35)';
+    ctx.fillText(Math.round(w.spd*100)+'% spd',wx,wheelY+bob+tr+19);
+    ctx.globalAlpha=1;
+  }
+
+  // Divider
+  ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(40,262,W-80,1);
+
+  // === GEAR SHOWCASE ===
+  ctx.font='bold 10px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText('COLLECT PROTECTIVE GEAR',W/2,278);
+
+  const gearNames=['Wrist Guards','Full-Face Helmet','Full Armor'];
+  const gearDescs=['Survive 1 hit','Survive 2 hits','Survive 3 hits'];
+  const gearColors=[['#8888aa','#666688'],['#4466bb','#3355aa'],['#cc4444','#aa3333']];
+  const gearSpacing=W/4;
+  for(let i=0;i<3;i++){
+    const gx=gearSpacing*(i+1);
+    const gy=310;
+    const isHL=Math.floor(time/80)%3===i;
+    const bob2=isHL?Math.sin(time*0.09)*2:0;
+    ctx.globalAlpha=isHL?1:0.5;
+    // Shield icon
+    const sr=isHL?16:13;
+    // Glow
+    if(isHL){ctx.fillStyle=`rgba(${i<2?'100,150,255':'220,80,80'},0.12)`;ctx.beginPath();ctx.arc(gx,gy+bob2,sr+6,0,Math.PI*2);ctx.fill();}
+    const ssg=ctx.createLinearGradient(gx-sr*0.7,gy+bob2-sr,gx+sr*0.7,gy+bob2+sr);
+    ssg.addColorStop(0,gearColors[i][0]);ssg.addColorStop(1,gearColors[i][1]||gearColors[i][0]);
+    ctx.fillStyle=ssg;ctx.beginPath();
+    ctx.moveTo(gx,gy+bob2-sr);ctx.lineTo(gx+sr*0.7,gy+bob2-sr*0.45);ctx.lineTo(gx+sr*0.7,gy+bob2+sr*0.15);
+    ctx.quadraticCurveTo(gx+sr*0.55,gy+bob2+sr*0.85,gx,gy+bob2+sr);
+    ctx.quadraticCurveTo(gx-sr*0.55,gy+bob2+sr*0.85,gx-sr*0.7,gy+bob2+sr*0.15);
+    ctx.lineTo(gx-sr*0.7,gy+bob2-sr*0.45);ctx.closePath();ctx.fill();
+    // Shield highlight
+    ctx.fillStyle='rgba(255,255,255,0.15)';ctx.beginPath();
+    ctx.moveTo(gx-1,gy+bob2-sr*0.8);ctx.lineTo(gx+sr*0.4,gy+bob2-sr*0.35);ctx.lineTo(gx+sr*0.4,gy+bob2);
+    ctx.quadraticCurveTo(gx+sr*0.1,gy+bob2+sr*0.3,gx-1,gy+bob2+sr*0.15);ctx.closePath();ctx.fill();
+    // Cross
+    ctx.fillStyle='#fff';ctx.fillRect(gx-1,gy+bob2-sr*0.4,2,sr*0.7);ctx.fillRect(gx-sr*0.25,gy+bob2-sr*0.08,sr*0.5,2);
+    // Hit count dots
+    for(let h=0;h<i+1;h++){
+      ctx.fillStyle=h<2?'#88aaff':'#ff6666';
+      ctx.beginPath();ctx.arc(gx-((i)*4)+h*8,gy+bob2+sr+8,2.5,0,Math.PI*2);ctx.fill();
+    }
+    // Label
+    ctx.font='bold 8px system-ui, sans-serif';ctx.fillStyle=isHL?'#fff':'rgba(255,255,255,0.6)';
+    ctx.fillText(gearNames[i],gx,gy+bob2+sr+20);
+    ctx.font='6px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.3)';
+    ctx.fillText(gearDescs[i],gx,gy+bob2+sr+29);
+    ctx.globalAlpha=1;
+  }
+
+  // Divider
+  ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(40,355,W-80,1);
+
+  // Controls (compact)
+  const cardY=365;
+  ctx.fillStyle='rgba(0,0,0,0.2)';roundRectFill(W/2-200,cardY,400,55,8);
+  ctx.font='600 11px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.6)';
+  ctx.fillText('◀ ▶  buttons       Lean to accelerate & steer',W/2,cardY+18);
+  ctx.fillText('JUMP  button       Jump',W/2,cardY+34);
+  ctx.fillStyle='rgba(255,255,255,0.35)';ctx.font='9px system-ui, sans-serif';
+  ctx.fillText('Lean opposite to brake  ·  Watch for tilt-back!  ·  8 Worlds  ·  32 Levels',W/2,cardY+48);
+
+  // Press space
+  const pulse=(Math.sin(time*0.08)+1)*0.5;
+  ctx.font='bold 20px system-ui, sans-serif';ctx.shadowColor=`rgba(248,208,64,${0.4*pulse})`;ctx.shadowBlur=12*pulse;
+  ctx.fillStyle=`rgba(248,208,64,${0.6+pulse*0.4})`;ctx.fillText('TAP TO RIDE',W/2,H-28);ctx.shadowBlur=0;
+  ctx.textAlign='left';
+}
+
+// ---- LEVEL INTRO ----
+function drawLevelIntro() {
+  ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  const nextDef = LEVELS[currentLevel+1];
+  // World label
+  ctx.font='600 16px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.fillText('WORLD',W/2,H/2-30);
+  ctx.font='bold 48px system-ui, sans-serif';
+  ctx.shadowColor='rgba(248,208,64,0.4)';ctx.shadowBlur=15;
+  ctx.fillStyle='#f8d040';ctx.fillText(nextDef.name,W/2,H/2+25);ctx.shadowBlur=0;
+  // Theme hint
+  const hints = {underground:'Underground',athletic:'Sky Athletics',castle:'Castle'};
+  if(hints[nextDef.theme]){
+    ctx.font='14px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.35)';
+    ctx.fillText(hints[nextDef.theme],W/2,H/2+55);
+  }
+  // Score
+  ctx.font='12px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.3)';
+  ctx.fillText('Score: '+P.score+'  ·  Coins: '+P.coins,W/2,H/2+90);
+  ctx.textAlign='left';
+}
+
+// ---- WIN SCREEN ----
+function drawWin() {
+  ctx.fillStyle='rgba(0,0,10,0.6)';ctx.fillRect(0,0,W,H);
+  const winGlow=ctx.createRadialGradient(W/2,H/2-20,20,W/2,H/2,250);
+  winGlow.addColorStop(0,'rgba(248,208,64,0.12)');winGlow.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=winGlow;ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.save();const colors=['#f8d040','#e02030','#2848d8','#30c830','#ff8020','#fff'];
+  for(let i=0;i<30;i++){
+    const seed=i*137.5;const cx2=(seed*3.7+time*(0.3+(i%5)*0.1))%(W+100)-50;
+    const cy2=(seed*2.3+time*(0.5+(i%3)*0.15))%(H+100)-50;
+    ctx.fillStyle=colors[i%colors.length];ctx.globalAlpha=0.6;ctx.save();ctx.translate(cx2,cy2);ctx.rotate(time*0.05+seed);
+    ctx.fillRect(-(3+(i%4))/2,-(3+(i%4))/4,3+(i%4),(3+(i%4))/2);ctx.restore();
+  }
+  ctx.globalAlpha=1;ctx.restore();
+  ctx.font='bold 46px system-ui, sans-serif';ctx.shadowColor='rgba(248,208,64,0.5)';ctx.shadowBlur=20;
+  ctx.fillStyle='#806010';ctx.fillText('COURSE CLEAR!',W/2+3,H/2-27);
+  ctx.fillStyle='#c09820';ctx.fillText('COURSE CLEAR!',W/2+1.5,H/2-28.5);
+  ctx.fillStyle='#f8d040';ctx.fillText('COURSE CLEAR!',W/2,H/2-30);ctx.shadowBlur=0;
+  ctx.globalAlpha=0.2;ctx.fillStyle='#fff';ctx.fillText('COURSE CLEAR!',W/2,H/2-31);ctx.globalAlpha=1;
+  const scX=W/2-120,scY=H/2,scW=240,scH=70;
+  ctx.fillStyle='rgba(0,0,0,0.35)';roundRectFill(scX,scY,scW,scH,8);
+  ctx.font='600 12px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.5)';ctx.fillText('SCORE',W/2,scY+20);
+  ctx.font='bold 26px system-ui, sans-serif';ctx.fillStyle='#fff';
+  ctx.fillText(String(P.score).replace(/\B(?=(\d{3})+(?!\d))/g,','),W/2,scY+50);
+  ctx.textAlign='left';
+}
+
+// ---- VICTORY SCREEN (final) ----
+function drawVictory() {
+  ctx.fillStyle='rgba(0,0,10,0.75)';ctx.fillRect(0,0,W,H);
+  const glow=ctx.createRadialGradient(W/2,H/2-40,30,W/2,H/2,300);
+  glow.addColorStop(0,'rgba(248,208,64,0.15)');glow.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=glow;ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  // More confetti
+  ctx.save();const colors=['#f8d040','#e02030','#2848d8','#30c830','#ff8020','#fff','#ff60a0','#60ff60'];
+  for(let i=0;i<60;i++){
+    const seed=i*97.3;const cx2=(seed*4.1+time*(0.4+(i%7)*0.08))%(W+100)-50;
+    const cy2=(seed*2.7+time*(0.6+(i%5)*0.12))%(H+100)-50;
+    ctx.fillStyle=colors[i%colors.length];ctx.globalAlpha=0.7;ctx.save();ctx.translate(cx2,cy2);ctx.rotate(time*0.04+seed);
+    const s=3+(i%5);ctx.fillRect(-s/2,-s/4,s,s/2);ctx.restore();
+  }
+  ctx.globalAlpha=1;ctx.restore();
+  // Title
+  ctx.font='bold 52px system-ui, sans-serif';ctx.shadowColor='rgba(248,208,64,0.6)';ctx.shadowBlur=25;
+  ctx.fillStyle='#806010';ctx.fillText('CONGRATULATIONS!',W/2+3,H/2-72);
+  ctx.fillStyle='#f8d040';ctx.fillText('CONGRATULATIONS!',W/2,H/2-75);ctx.shadowBlur=0;
+  // Subtitle
+  ctx.font='bold 24px system-ui, sans-serif';ctx.fillStyle='#fff';
+  ctx.fillText('ALL WORLDS CLEARED!',W/2,H/2-35);
+  // Score card
+  const scX=W/2-140,scY=H/2-10,scW=280,scH=90;
+  ctx.fillStyle='rgba(0,0,0,0.4)';roundRectFill(scX,scY,scW,scH,10);
+  ctx.font='600 12px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.fillText('FINAL SCORE',W/2,scY+22);
+  ctx.font='bold 32px system-ui, sans-serif';ctx.fillStyle='#f8d040';
+  ctx.fillText(String(P.score).replace(/\B(?=(\d{3})+(?!\d))/g,','),W/2,scY+58);
+  ctx.font='14px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';
+  ctx.fillText('Coins: '+P.coins,W/2,scY+78);
+  // Rank
+  ctx.font='bold 18px system-ui, sans-serif';
+  ctx.shadowColor='rgba(248,208,64,0.3)';ctx.shadowBlur=10;
+  ctx.fillStyle='#f8d040';ctx.fillText('⚡ EUC MASTER ⚡',W/2,scY+scH+35);ctx.shadowBlur=0;
+  // Return prompt
+  if(stateTimer>300){
+    const pulse=(Math.sin(time*0.08)+1)*0.5;
+    ctx.font='16px system-ui, sans-serif';ctx.fillStyle=`rgba(255,255,255,${0.4+pulse*0.4})`;
+    ctx.fillText('TAP TO RETURN',W/2,scY+scH+75);
+  }
+  ctx.textAlign='left';
+}
+
+// ============================================================
+//  TOUCH CONTROLS OVERLAY
+// ============================================================
+function drawTouchControls() {
+  if (state !== 'playing' && state !== 'dead') return;
+  ctx.save();
+  for (const [name, b] of Object.entries(touchButtons)) {
+    if (name === 'menu') {
+      // Small menu button in HUD bar
+      if (state !== 'playing') continue;
+      ctx.fillStyle = b.pressed ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.08)';
+      roundRectFill(b.x, b.y, b.w, b.h, 6);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = '8px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('MENU', b.x + b.w/2, b.y + b.h/2 + 3);
+      continue;
+    }
+    const pr = b.pressed;
+    ctx.fillStyle = pr ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.06)';
+    ctx.strokeStyle = pr ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1.5;
+    // Rounded rect
+    const r = 14;
+    ctx.beginPath();
+    ctx.moveTo(b.x+r, b.y); ctx.lineTo(b.x+b.w-r, b.y);
+    ctx.quadraticCurveTo(b.x+b.w, b.y, b.x+b.w, b.y+r);
+    ctx.lineTo(b.x+b.w, b.y+b.h-r);
+    ctx.quadraticCurveTo(b.x+b.w, b.y+b.h, b.x+b.w-r, b.y+b.h);
+    ctx.lineTo(b.x+r, b.y+b.h);
+    ctx.quadraticCurveTo(b.x, b.y+b.h, b.x, b.y+b.h-r);
+    ctx.lineTo(b.x, b.y+r);
+    ctx.quadraticCurveTo(b.x, b.y, b.x+r, b.y); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // Icon
+    ctx.fillStyle = pr ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.25)';
+    const cx = b.x + b.w/2, cy = b.y + b.h/2;
+    if (name === 'left') {
+      ctx.beginPath(); ctx.moveTo(cx+14,cy-20); ctx.lineTo(cx-14,cy); ctx.lineTo(cx+14,cy+20); ctx.closePath(); ctx.fill();
+    } else if (name === 'right') {
+      ctx.beginPath(); ctx.moveTo(cx-14,cy-20); ctx.lineTo(cx+14,cy); ctx.lineTo(cx-14,cy+20); ctx.closePath(); ctx.fill();
+    } else if (name === 'jump') {
+      ctx.beginPath(); ctx.moveTo(cx,cy-22); ctx.lineTo(cx+22,cy+6); ctx.lineTo(cx-22,cy+6); ctx.closePath(); ctx.fill();
+      ctx.font = 'bold 13px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('JUMP', cx, cy+28);
+    }
+  }
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+// ============================================================
+//  PORTRAIT OVERLAY
+// ============================================================
+function drawPortraitOverlay() {
+  const sw = window.innerWidth, sh = window.innerHeight;
+  if (sh <= sw) { isPortrait = false; return; }
+  isPortrait = true;
+  // Draw over everything in logical coords
+  ctx.fillStyle = 'rgba(0,0,0,0.92)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  // Rotate phone icon
+  const cx = W/2, cy = H/2 - 30;
+  ctx.save();
+  ctx.translate(cx, cy);
+  const wobble = Math.sin(time * 0.04) * 0.15;
+  ctx.rotate(wobble);
+  // Phone outline
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 3; ctx.lineJoin = 'round';
+  ctx.strokeRect(-18, -30, 36, 60);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(-14, -24, 28, 48);
+  // Home button dot
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.arc(0, 26, 3, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  // Arrow suggesting rotation
+  ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.fillStyle = '#f8d040';
+  ctx.fillText('↻', cx + 40, cy + 5);
+  // Text
+  ctx.font = 'bold 18px system-ui, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Rotate Your Phone', W/2, H/2 + 40);
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('This game is best played in landscape', W/2, H/2 + 60);
+  ctx.textAlign = 'left';
+}
+
+// ============================================================
+//  GAME LOOP
+// ============================================================
+resetPlayer();
+loadLevel(0);
+
+let lastFrameTime = 0;
+function loop(now) {
+  // Cap at ~66fps to prevent double-speed on 120Hz screens
+  if (now - lastFrameTime < 14) { requestAnimationFrame(loop); return; }
+  lastFrameTime = now;
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// Fullscreen on first tap (hides address bar on mobile)
+document.addEventListener('touchstart', function goFS() {
+  const el = document.documentElement;
+  const rfs = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (rfs) rfs.call(el).catch(()=>{});
+  if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(()=>{});
+  document.removeEventListener('touchstart', goFS);
+}, { once:true });
+
+// Wake lock to prevent screen dimming
+let wakeLock = null;
+async function requestWakeLock() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
+requestWakeLock();
+</script>
+</body>
+</html>
