@@ -2464,108 +2464,186 @@ function drawTitle() {
   ctx.font='600 11px system-ui, sans-serif';ctx.fillStyle='rgba(200,200,220,0.6)';ctx.fillText('ELECTRIC  UNICYCLE  EDITION',W/2,146);
   ctx.fillStyle='rgba(248,208,64,0.25)';ctx.fillRect(W/2-80,152,160,1);
 
-  // === WHEELS SHOWCASE ===
-  ctx.font='bold 10px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';
-  ctx.fillText('FIND UPGRADED WHEELS',W/2,172);
+  // === WHEEL CAROUSEL ===
+  ctx.font='bold 12px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.fillText('FIND UPGRADED WHEELS',W/2,168);
 
-  const wheelY=210, wheelSpacing=W/(WHEELS.length+1);
-  for(let i=0;i<WHEELS.length;i++){
-    const wx=wheelSpacing*(i+1);
-    const w=WHEELS[i];
-    const isHighlight=Math.floor(time/60)%WHEELS.length===i;
-    const bob=isHighlight?Math.sin(time*0.1)*3:0;
-    const alpha=isHighlight?1:0.55;
-    ctx.globalAlpha=alpha;
-    // Mini tire
-    const tr=12+i*0.8;
-    ctx.fillStyle='#222';ctx.beginPath();ctx.arc(wx,wheelY+bob,tr,0,Math.PI*2);ctx.fill();
-    ctx.strokeStyle='rgba(60,60,60,0.4)';ctx.lineWidth=1;
-    for(let j=0;j<6;j++){const a=time*0.03+j*Math.PI/3;ctx.beginPath();ctx.moveTo(wx+Math.cos(a)*4,wheelY+bob+Math.sin(a)*4);ctx.lineTo(wx+Math.cos(a)*(tr-1),wheelY+bob+Math.sin(a)*(tr-1));ctx.stroke();}
-    ctx.fillStyle='#666';ctx.beginPath();ctx.arc(wx,wheelY+bob,3,0,Math.PI*2);ctx.fill();
-    // Mini shell
-    const msw=6,msh=tr*1.2,mst=wheelY+bob-msh/2;
-    const sg=ctx.createLinearGradient(wx-msw/2,0,wx+msw/2,0);
-    sg.addColorStop(0,w.shell);sg.addColorStop(0.5,'#444');sg.addColorStop(1,w.shell);
-    ctx.fillStyle=sg;ctx.fillRect(wx-msw/2,mst,msw,msh);
-    // LED
-    ctx.fillStyle=w.led;ctx.shadowColor=w.led;ctx.shadowBlur=isHighlight?8:4;
-    ctx.fillRect(wx-msw/2+1,mst+1,msw-2,2);ctx.shadowBlur=0;
-    ctx.fillStyle=w.led2;ctx.fillRect(wx-msw/2+1,mst+msh-3,msw-2,1.5);
-    // Pedals
-    ctx.fillStyle='#555';ctx.fillRect(wx-msw/2-6,wheelY+bob-1,7,2);ctx.fillRect(wx+msw/2-1,wheelY+bob-1,7,2);
-    // Label
-    ctx.font='bold 7px system-ui, sans-serif';ctx.fillStyle=isHighlight?w.led:'rgba(255,255,255,0.6)';
-    ctx.fillText(w.name,wx,wheelY+bob+tr+10);
-    // Speed stat
-    ctx.font='6px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.35)';
-    ctx.fillText(Math.round(w.spd*100)+'% spd',wx,wheelY+bob+tr+19);
-    ctx.globalAlpha=1;
-  }
+  // Auto-scrolling carousel - big EUC illustrations
+  const carY = 280, cardW = 200, cardH = 180, gap = 24;
+  const totalW = WHEELS.length * (cardW + gap);
+  const scrollX = (time * 0.6) % totalW; // auto-scroll speed
 
-  // Divider
-  ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(40,262,W-80,1);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 175, W, cardH + 30); ctx.clip();
 
-  // === GEAR SHOWCASE ===
-  ctx.font='bold 10px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.4)';
-  ctx.fillText('COLLECT PROTECTIVE GEAR',W/2,278);
+  for (let pass = 0; pass < 2; pass++) { // draw twice for seamless loop
+    const baseX = -scrollX + pass * totalW;
+    for (let i = 0; i < WHEELS.length; i++) {
+      const w = WHEELS[i];
+      const cx = baseX + i * (cardW + gap) + cardW / 2;
+      if (cx < -cardW || cx > W + cardW) continue; // cull offscreen
 
-  const gearNames=['Wrist Guards','Full-Face Helmet','Full Armor'];
-  const gearDescs=['Survive 1 hit','Survive 2 hits','Survive 3 hits'];
-  const gearColors=[['#8888aa','#666688'],['#4466bb','#3355aa'],['#cc4444','#aa3333']];
-  const gearSpacing=W/4;
-  for(let i=0;i<3;i++){
-    const gx=gearSpacing*(i+1);
-    const gy=310;
-    const isHL=Math.floor(time/80)%3===i;
-    const bob2=isHL?Math.sin(time*0.09)*2:0;
-    ctx.globalAlpha=isHL?1:0.5;
-    // Shield icon
-    const sr=isHL?16:13;
-    // Glow
-    if(isHL){ctx.fillStyle=`rgba(${i<2?'100,150,255':'220,80,80'},0.12)`;ctx.beginPath();ctx.arc(gx,gy+bob2,sr+6,0,Math.PI*2);ctx.fill();}
-    const ssg=ctx.createLinearGradient(gx-sr*0.7,gy+bob2-sr,gx+sr*0.7,gy+bob2+sr);
-    ssg.addColorStop(0,gearColors[i][0]);ssg.addColorStop(1,gearColors[i][1]||gearColors[i][0]);
-    ctx.fillStyle=ssg;ctx.beginPath();
-    ctx.moveTo(gx,gy+bob2-sr);ctx.lineTo(gx+sr*0.7,gy+bob2-sr*0.45);ctx.lineTo(gx+sr*0.7,gy+bob2+sr*0.15);
-    ctx.quadraticCurveTo(gx+sr*0.55,gy+bob2+sr*0.85,gx,gy+bob2+sr);
-    ctx.quadraticCurveTo(gx-sr*0.55,gy+bob2+sr*0.85,gx-sr*0.7,gy+bob2+sr*0.15);
-    ctx.lineTo(gx-sr*0.7,gy+bob2-sr*0.45);ctx.closePath();ctx.fill();
-    // Shield highlight
-    ctx.fillStyle='rgba(255,255,255,0.15)';ctx.beginPath();
-    ctx.moveTo(gx-1,gy+bob2-sr*0.8);ctx.lineTo(gx+sr*0.4,gy+bob2-sr*0.35);ctx.lineTo(gx+sr*0.4,gy+bob2);
-    ctx.quadraticCurveTo(gx+sr*0.1,gy+bob2+sr*0.3,gx-1,gy+bob2+sr*0.15);ctx.closePath();ctx.fill();
-    // Cross
-    ctx.fillStyle='#fff';ctx.fillRect(gx-1,gy+bob2-sr*0.4,2,sr*0.7);ctx.fillRect(gx-sr*0.25,gy+bob2-sr*0.08,sr*0.5,2);
-    // Hit count dots
-    for(let h=0;h<i+1;h++){
-      ctx.fillStyle=h<2?'#88aaff':'#ff6666';
-      ctx.beginPath();ctx.arc(gx-((i)*4)+h*8,gy+bob2+sr+8,2.5,0,Math.PI*2);ctx.fill();
+      // Distance from center for parallax fade
+      const distFromCenter = Math.abs(cx - W / 2);
+      const fadeAlpha = Math.max(0, 1 - distFromCenter / (W * 0.55));
+      const scale = 0.75 + 0.25 * fadeAlpha; // scale up near center
+      ctx.globalAlpha = 0.3 + 0.7 * fadeAlpha;
+
+      ctx.save();
+      ctx.translate(cx, carY);
+      ctx.scale(scale, scale);
+
+      // Card background
+      const cg = ctx.createLinearGradient(0, -cardH/2, 0, cardH/2);
+      cg.addColorStop(0, 'rgba(255,255,255,0.06)');
+      cg.addColorStop(1, 'rgba(255,255,255,0.02)');
+      ctx.fillStyle = cg;
+      ctx.strokeStyle = `rgba(${hexToR(w.led)},${hexToG(w.led)},${hexToB(w.led)},${0.15 + 0.2 * fadeAlpha})`;
+      ctx.lineWidth = 1.5;
+      roundRectFill(-cardW/2, -cardH/2, cardW, cardH, 12);
+      ctx.beginPath();
+      ctx.moveTo(-cardW/2+12, -cardH/2); ctx.lineTo(cardW/2-12, -cardH/2);
+      ctx.quadraticCurveTo(cardW/2, -cardH/2, cardW/2, -cardH/2+12);
+      ctx.lineTo(cardW/2, cardH/2-12);
+      ctx.quadraticCurveTo(cardW/2, cardH/2, cardW/2-12, cardH/2);
+      ctx.lineTo(-cardW/2+12, cardH/2);
+      ctx.quadraticCurveTo(-cardW/2, cardH/2, -cardW/2, cardH/2-12);
+      ctx.lineTo(-cardW/2, -cardH/2+12);
+      ctx.quadraticCurveTo(-cardW/2, -cardH/2, -cardW/2+12, -cardH/2);
+      ctx.stroke();
+
+      // Big tire
+      const tr = 28 + i * 2; // grows with tier
+      const ty = 10;
+      const tireGrad = ctx.createRadialGradient(-3, ty - 3, 2, 0, ty, tr);
+      tireGrad.addColorStop(0, '#3a3a3a'); tireGrad.addColorStop(0.7, '#1a1a1a'); tireGrad.addColorStop(1, '#111');
+      ctx.fillStyle = tireGrad;
+      ctx.beginPath(); ctx.arc(0, ty, tr, 0, Math.PI * 2); ctx.fill();
+      // Tread
+      ctx.strokeStyle = 'rgba(80,80,80,0.4)'; ctx.lineWidth = 1.5;
+      for (let j = 0; j < 12; j++) {
+        const a = time * 0.025 + j * Math.PI / 6;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * 10, ty + Math.sin(a) * 10);
+        ctx.lineTo(Math.cos(a) * (tr - 1), ty + Math.sin(a) * (tr - 1));
+        ctx.stroke();
+      }
+      // Hub
+      ctx.fillStyle = '#555'; ctx.beginPath(); ctx.arc(0, ty, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#777'; ctx.beginPath(); ctx.arc(0, ty, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#999'; ctx.beginPath(); ctx.arc(0, ty, 2, 0, Math.PI * 2); ctx.fill();
+
+      // Shell
+      const sw = 20, sh = tr * 1.6, st = ty - sh / 2;
+      const shellGrad = ctx.createLinearGradient(-sw/2, 0, sw/2, 0);
+      shellGrad.addColorStop(0, w.shell); shellGrad.addColorStop(0.3, '#555'); shellGrad.addColorStop(0.7, '#555'); shellGrad.addColorStop(1, w.shell);
+      ctx.fillStyle = shellGrad;
+      ctx.beginPath();
+      ctx.moveTo(-sw/2 + 4, st); ctx.lineTo(sw/2 - 4, st);
+      ctx.quadraticCurveTo(sw/2, st, sw/2, st + 4);
+      ctx.lineTo(sw/2, st + sh - 4);
+      ctx.quadraticCurveTo(sw/2, st + sh, sw/2 - 4, st + sh);
+      ctx.lineTo(-sw/2 + 4, st + sh);
+      ctx.quadraticCurveTo(-sw/2, st + sh, -sw/2, st + sh - 4);
+      ctx.lineTo(-sw/2, st + 4);
+      ctx.quadraticCurveTo(-sw/2, st, -sw/2 + 4, st);
+      ctx.fill();
+
+      // LEDs (top + bottom)
+      ctx.shadowColor = w.led; ctx.shadowBlur = 12;
+      ctx.fillStyle = w.led;
+      ctx.fillRect(-sw/2 + 3, st + 2, sw - 6, 3);
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = w.led2;
+      ctx.fillRect(-sw/2 + 3, st + sh - 5, sw - 6, 3);
+      ctx.shadowBlur = 0;
+
+      // Pedals
+      ctx.fillStyle = '#666';
+      ctx.fillRect(-sw/2 - 16, ty - 2, 18, 4);
+      ctx.fillRect(sw/2 - 2, ty - 2, 18, 4);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(-sw/2 - 14, ty - 1, 14, 2);
+      ctx.fillRect(sw/2, ty - 1, 14, 2);
+
+      // Name
+      ctx.font = 'bold 14px system-ui, sans-serif';
+      ctx.fillStyle = w.led;
+      ctx.shadowColor = w.led; ctx.shadowBlur = 6;
+      ctx.fillText(w.name, 0, ty + tr + 22);
+      ctx.shadowBlur = 0;
+
+      // Brand + desc
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillText(w.brand + '  ·  ' + w.tire + '"', 0, ty + tr + 36);
+
+      // Speed bar
+      const barW = 80, barH = 5, barX = -barW/2, barY = ty + tr + 44;
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      roundRectFill(barX, barY, barW, barH, 2.5);
+      const pct = w.spd / 2; // max is 2.0
+      const spdGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      spdGrad.addColorStop(0, '#44ee44'); spdGrad.addColorStop(0.5, '#eecc22'); spdGrad.addColorStop(1, '#ff3333');
+      ctx.fillStyle = spdGrad;
+      ctx.save(); ctx.beginPath(); ctx.rect(barX, barY, barW * pct, barH); ctx.clip();
+      roundRectFill(barX, barY, barW, barH, 2.5);
+      ctx.restore();
+      ctx.font = 'bold 9px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillText(Math.round(w.spd * 100) + '% speed', 0, barY + 15);
+
+      ctx.restore();
     }
-    // Label
-    ctx.font='bold 8px system-ui, sans-serif';ctx.fillStyle=isHL?'#fff':'rgba(255,255,255,0.6)';
-    ctx.fillText(gearNames[i],gx,gy+bob2+sr+20);
-    ctx.font='6px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.3)';
-    ctx.fillText(gearDescs[i],gx,gy+bob2+sr+29);
-    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+
+  // Carousel fade edges
+  const fadeW = 80;
+  const edgeFadeL = ctx.createLinearGradient(0, 0, fadeW, 0);
+  edgeFadeL.addColorStop(0, 'rgba(0,0,20,0.9)'); edgeFadeL.addColorStop(1, 'rgba(0,0,20,0)');
+  ctx.fillStyle = edgeFadeL; ctx.fillRect(0, 175, fadeW, cardH + 30);
+  const edgeFadeR = ctx.createLinearGradient(W - fadeW, 0, W, 0);
+  edgeFadeR.addColorStop(0, 'rgba(0,0,20,0)'); edgeFadeR.addColorStop(1, 'rgba(0,0,20,0.9)');
+  ctx.fillStyle = edgeFadeR; ctx.fillRect(W - fadeW, 175, fadeW, cardH + 30);
+
+  // Scroll indicator dots
+  const dotY = 390;
+  const activeDot = Math.floor((scrollX / totalW) * WHEELS.length) % WHEELS.length;
+  for (let i = 0; i < WHEELS.length; i++) {
+    ctx.fillStyle = i === activeDot ? WHEELS[i].led : 'rgba(255,255,255,0.15)';
+    ctx.beginPath(); ctx.arc(W/2 + (i - 3.5) * 14, dotY, i === activeDot ? 3.5 : 2.5, 0, Math.PI * 2); ctx.fill();
   }
 
-  // Divider
-  ctx.fillStyle='rgba(255,255,255,0.08)';ctx.fillRect(40,355,W-80,1);
+  // === GEAR + CONTROLS (compact bottom strip) ===
+  ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(40, 405, W - 80, 1);
+  // Gear icons inline
+  const gearNames = ['Wrist Guards', 'Full-Face Helmet', 'Full Armor'];
+  const gearIcons = ['🧤', '⛑', '🛡'];
+  const gearHits = [1, 2, 3];
+  ctx.font = '11px system-ui, sans-serif';
+  const gLeft = W/2 - 200;
+  for (let i = 0; i < 3; i++) {
+    const gx = gLeft + i * 140;
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.textAlign = 'left';
+    ctx.fillText(gearNames[i], gx + 4, 425);
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fillText(gearHits[i] + ' hit' + (gearHits[i] > 1 ? 's' : ''), gx + 4, 438);
+  }
+  ctx.textAlign = 'center';
+  ctx.font = '9px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillText('◀ ▶ lean  ·  JUMP ▲  ·  8 Worlds  ·  32 Levels', W/2, 460);
 
-  // Controls (compact)
-  const cardY=365;
-  ctx.fillStyle='rgba(0,0,0,0.2)';roundRectFill(W/2-200,cardY,400,55,8);
-  ctx.font='600 11px system-ui, sans-serif';ctx.fillStyle='rgba(255,255,255,0.6)';
-  ctx.fillText('◀ ▶  buttons       Lean to accelerate & steer',W/2,cardY+18);
-  ctx.fillText('JUMP  button       Jump',W/2,cardY+34);
-  ctx.fillStyle='rgba(255,255,255,0.35)';ctx.font='9px system-ui, sans-serif';
-  ctx.fillText('Lean opposite to brake  ·  Watch for tilt-back!  ·  8 Worlds  ·  32 Levels',W/2,cardY+48);
-
-  // Press space
-  const pulse=(Math.sin(time*0.08)+1)*0.5;
-  ctx.font='bold 20px system-ui, sans-serif';ctx.shadowColor=`rgba(248,208,64,${0.4*pulse})`;ctx.shadowBlur=12*pulse;
-  ctx.fillStyle=`rgba(248,208,64,${0.6+pulse*0.4})`;ctx.fillText('TAP TO RIDE',W/2,H-28);ctx.shadowBlur=0;
-  ctx.textAlign='left';
+  // TAP TO RIDE
+  const pulse = (Math.sin(time * 0.08) + 1) * 0.5;
+  ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.shadowColor = `rgba(248,208,64,${0.4 * pulse})`; ctx.shadowBlur = 14 * pulse;
+  ctx.fillStyle = `rgba(248,208,64,${0.6 + pulse * 0.4})`;
+  ctx.fillText('TAP TO RIDE', W/2, H - 22);
+  ctx.shadowBlur = 0;
+  ctx.textAlign = 'left';
 }
 
 // ---- LEVEL INTRO ----
