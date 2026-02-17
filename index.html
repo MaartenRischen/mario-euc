@@ -1539,7 +1539,9 @@ function update() {
   time++;
 
   if (state==='title') {
-    if (justPressed['Space']||justPressed['Enter']) resetGame();
+    stateTimer++;
+    // Require title visible for 60 frames (~1s) before touch/tap can start game
+    if (stateTimer > 60 && (justPressed['Space']||justPressed['Enter'])) resetGame();
     clearJustPressed(); return;
   }
   if (state==='dead') {
@@ -1575,7 +1577,7 @@ function update() {
   }
   if (state==='victory') {
     stateTimer++;
-    if (stateTimer>300 && (justPressed['Space']||justPressed['Enter'])) state='title';
+    if (stateTimer>300 && (justPressed['Space']||justPressed['Enter'])) { state='title'; stateTimer=0; }
     clearJustPressed(); return;
   }
 
@@ -1685,7 +1687,7 @@ function update() {
     particles.push({x:P.x+P.w/2-P.vx*0.5,y:P.y+P.h-4,vx:-P.vx*0.15,vy:-0.3,color:'rgba(200,200,200,0.5)',life:15,maxLife:15,size:3});
   }
 
-  if(keys['KeyR']) state='title';
+  if(keys['KeyR']) { state='title'; stateTimer=0; }
   clearJustPressed();
 }
 
