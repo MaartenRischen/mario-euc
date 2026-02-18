@@ -54,7 +54,7 @@ function resizeCanvas() {
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
-window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 150));
+window.addEventListener('orientationchange', () => { portraitDismissed = false; setTimeout(resizeCanvas, 150); });
 
 function screenToLogical(cx, cy) {
   const dpr = window.devicePixelRatio || 1;
@@ -106,6 +106,7 @@ function getTouchedBtn(lx, ly) {
 
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
+  if (isPortrait) { portraitDismissed = true; return; }
   for (const t of e.changedTouches) {
     const p = screenToLogical(t.clientX, t.clientY);
     // Check menu button
@@ -2813,9 +2814,13 @@ function drawTouchControls() {
 // ============================================================
 //  PORTRAIT OVERLAY
 // ============================================================
+let portraitDismissed = false;
 function drawPortraitOverlay() {
   const sw = window.innerWidth, sh = window.innerHeight;
-  if (sh <= sw) { isPortrait = false; return; }
+  // Use screen.orientation API when available (more reliable on Android)
+  const orient = screen.orientation && screen.orientation.type;
+  const isLandscape = orient ? orient.startsWith('landscape') : (sw >= sh);
+  if (isLandscape || portraitDismissed) { isPortrait = false; return; }
   isPortrait = true;
   // Draw over everything in logical coords
   ctx.fillStyle = 'rgba(0,0,0,0.92)';
@@ -2847,6 +2852,9 @@ function drawPortraitOverlay() {
   ctx.font = '12px system-ui, sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
   ctx.fillText('This game is best played in landscape', W/2, H/2 + 60);
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fillText('Tap to play anyway', W/2, H/2 + 85);
   ctx.textAlign = 'left';
 }
 
