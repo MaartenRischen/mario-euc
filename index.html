@@ -1825,7 +1825,27 @@ function draw() {
   ctx.globalAlpha=1; ctx.textAlign='left';
 
   // Player
-  if(state!=='title'&&state!=='levelClear'&&state!=='victory') drawMario(P.x-cx,P.y,state==='dead');
+  if(state!=='title'&&state!=='levelClear'&&state!=='victory') {
+    // Shadow (stays on ground when jumping)
+    const shadowX=P.x-cx+P.w/2;
+    let groundY=-1;
+    const ptx=Math.floor((P.x+P.w/2)/T);
+    for(let pty=Math.floor((P.y+P.h)/T);pty<LH;pty++){
+      if(solid(tileAt(ptx*T,pty*T))){groundY=pty*T;break;}
+    }
+    if(groundY>=0){
+      const sg2=ctx.createRadialGradient(shadowX,groundY+3,2,shadowX,groundY+3,14);
+      sg2.addColorStop(0,'rgba(0,0,0,0.25)');sg2.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=sg2;ctx.beginPath();ctx.ellipse(shadowX,groundY+3,14,4,0,0,Math.PI*2);ctx.fill();
+    }
+    // Draw Mario (scaled 2/3 — 1/3 shorter)
+    ctx.save();
+    const marioS=2/3;
+    const feetX=P.x-cx+P.w/2,feetY=P.y+P.h;
+    ctx.translate(feetX,feetY);ctx.scale(marioS,marioS);ctx.translate(-feetX,-feetY);
+    drawMario(P.x-cx,P.y,state==='dead');
+    ctx.restore();
+  }
 
   // Atmospheric haze
   const hazeGrad=ctx.createLinearGradient(0,13*T-20,0,13*T+10);
@@ -2243,10 +2263,7 @@ function drawMario(dx,dy,dead) {
   const speed=Math.abs(p.vx);
   const dir=p.facingRight?1:-1; // 1=right, -1=left
   const eucX=cx,eucBottom=dy+p.h,wheelR=11,wheelY=eucBottom-wheelR;
-  // Shadow
-  const sg=ctx.createRadialGradient(eucX,eucBottom+3,2,eucX,eucBottom+3,20);
-  sg.addColorStop(0,'rgba(0,0,0,0.25)');sg.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.fillStyle=sg;ctx.beginPath();ctx.ellipse(eucX,eucBottom+3,20,5,0,0,Math.PI*2);ctx.fill();
+  // Shadow drawn externally in draw() so it stays on ground
   // Tire
   const tg=ctx.createRadialGradient(eucX-2,wheelY-2,1,eucX,wheelY,wheelR);
   tg.addColorStop(0,'#404040');tg.addColorStop(0.6,'#2a2a2a');tg.addColorStop(1,'#1a1a1a');
