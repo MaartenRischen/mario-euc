@@ -1323,24 +1323,19 @@ function loadLevel(idx) {
   coinItems = def.coins.map(([x,y])=>({x:x*T+16,y:y*T+16,collected:false,bobOffset:Math.random()*Math.PI*2}));
   particles = [];
   floatTexts = [];
-  // Wheel upgrade pickup
+  // Wheel upgrade pickup — one per level if a better wheel is available
   wheelPickups = [];
-  const ws = WHEEL_SPAWNS[idx];
-  if (ws && ws.tier > P.wheelTier) {
-    const wy = findGroundY(level, ws.xt, LH) - 2;
-    wheelPickups.push({x:ws.xt*T+16, y:wy*T+16, tier:ws.tier, collected:false, bobOffset:0});
+  if (P.wheelTier < WHEELS.length - 1) {
+    const wxt = Math.floor(def.width * 0.25);
+    const wy = findGroundY(level, wxt, LH) - 2;
+    wheelPickups.push({x:wxt*T+16, y:wy*T+16, tier:P.wheelTier+1, collected:false, bobOffset:0});
   }
-  // Gear pickups every 2 levels (on ground-safe spots)
+  // Gear pickup — one per level if gear can still upgrade
   gearPickups = [];
-  if (idx % 2 === 1) {
-    const gx1 = Math.floor(def.width * 0.35);
+  if (P.gearTier < GEAR_LEVELS.length - 1) {
+    const gx1 = Math.floor(def.width * 0.5);
     const gy1 = findGroundY(level, gx1, LH) - 2;
     gearPickups.push({x:gx1*T+16, y:gy1*T+16, collected:false, bobOffset:Math.random()*Math.PI*2});
-  }
-  if (idx % 3 === 0 && idx > 0) {
-    const gx2 = Math.floor(def.width * 0.65);
-    const gy2 = findGroundY(level, gx2, LH) - 2;
-    gearPickups.push({x:gx2*T+16, y:gy2*T+16, collected:false, bobOffset:Math.random()*Math.PI*2});
   }
   // Player position reset (preserve score)
   P.x = def.playerStart.x*T;
